@@ -49,6 +49,8 @@ provider                            = google-vertex/global
 brew install Proton1917/tap/spt
 ```
 
+Apple Silicon macOS Tahoe 使用预编译 Homebrew bottle，直接安装约 6 MB 的 `spt`，不需要在用户机器上安装 Rust、LLVM、Python 或 Z3 编译工具链。其他尚无 bottle 的 macOS/Linux 平台会回退到锁定源码构建。FFmpeg 仍是实际运行依赖，用于媒体校验、解码、切分和 OCR 图片规范化。
+
 升级与卸载：
 
 ```bash
