@@ -13,8 +13,10 @@ use spt::openrouter::OpenRouterClient;
     name = "spt",
     version,
     about = "安全、可持久配置的 OpenRouter 语音转文字 CLI",
-    long_about = "给出合法的本地音频路径，在同一目录生成 Markdown 文字稿。长音频会先按时长切分；模型输出达到 Token 边界时会继续递归二分。",
-    arg_required_else_help = true
+    long_about = "spt 使用 OpenRouter 音频多模态模型转写本地录音，并由 Rust SpeakerHarness 维护跨片段说话人编号。\n\n直接给出合法音频路径后，会在源文件同一目录生成同名 Markdown 文字稿。默认每 15 分钟切分；正文过长时从无损母版继续二分。模型和 provider 会持久保存，直到再次修改。",
+    arg_required_else_help = false,
+    disable_help_subcommand = true,
+    after_help = "常用指令：\n  spt <AUDIO_PATH>                         转写音频，在原位置生成同名 .md\n  spt --force <AUDIO_PATH>                 完整成功后原子替换已有文字稿\n  spt --model <MODEL_ID>                   持久设置 OpenRouter 模型\n  spt --provider <ENDPOINT_TAG|any>        持久设置精确 provider 或自动路由\n  spt models [SEARCH]                      列出支持音频的模型\n  spt providers [MODEL_ID]                 列出模型可用的 provider endpoints\n  spt config                               查看生效配置，不显示 API Key\n  spt ocr <IMAGE_PATH>                     OCR 单张图片，生成 *.ocr.md\n  spt help [COMMAND]                       显示完整介绍或指定子命令帮助\n\n示例：\n  spt \"会议录音.m4a\"\n  spt --model google/gemini-3.5-flash-lite\n  spt --provider google-vertex/global\n  spt help ocr\n\n说明：\n  - OPENROUTER_API_KEY 只从环境变量读取，不会写入配置。\n  - 默认不覆盖已有输出；只有 --force 会在完整结果就绪后原子替换。\n  - provider=any 是显式隐私降级；固定 provider 会要求 ZDR 并关闭 fallback。"
 )]
 struct Cli {
     /// 要转写的本地音频文件
@@ -59,6 +61,12 @@ enum Commands {
     },
     /// 显示生效配置和配置文件位置，不显示 API Key
     Config,
+    /// 显示完整中文指令介绍，或查看指定子命令帮助
+    Help {
+        /// 可选：ocr、models、providers、config 或 help
+        #[arg(value_name = "COMMAND")]
+        command: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -87,6 +95,22 @@ async fn main() -> ExitCode {
 
 async fn run() -> Result<()> {
     let cli = Cli::parse();
+    if cli.audio_path.is_none()
+        && cli.command.is_none()
+        && cli.model.is_none()
+        && cli.provider.is_none()
+        && !cli.force
+    {
+        print_command_help(None)?;
+        return Ok(());
+    }
+    if let Some(Commands::Help { command }) = cli.command.as_ref() {
+        if cli.audio_path.is_some() || cli.model.is_some() || cli.provider.is_some() || cli.force {
+            bail!("spt help 不能与音频路径、配置选项或 --force 同时使用");
+        }
+        print_command_help(command.as_deref())?;
+        return Ok(());
+    }
     let (mut config, config_path, config_existed, config_migrated) = Config::load()?;
     let changed =
         apply_config_overrides(&mut config, cli.model.as_deref(), cli.provider.as_deref())?;
@@ -167,6 +191,7 @@ async fn run() -> Result<()> {
                 reject_force(cli.force)?;
                 print_config(&config, &config_path);
             }
+            Commands::Help { .. } => unreachable!("help 已在配置加载前处理"),
         }
         return Ok(());
     }
@@ -186,6 +211,46 @@ async fn run() -> Result<()> {
     Cli::command().print_help()?;
     println!();
     Ok(())
+}
+
+fn print_command_help(command: Option<&str>) -> Result<()> {
+    let mut root = Cli::command();
+    match command {
+        None => root.print_long_help()?,
+        Some(name) => {
+            let available = "ocr、models、providers、config、help、audio";
+            let guide = command_topic_guide(name)
+                .ok_or_else(|| anyhow::anyhow!("未知帮助主题 {name:?}；可选：{available}"))?;
+            println!("{guide}");
+            return Ok(());
+        }
+    }
+    println!();
+    Ok(())
+}
+
+fn command_topic_guide(name: &str) -> Option<&'static str> {
+    match name {
+        "audio" | "transcribe" | "转写" => Some(
+            "音频转写\n\n用法：\n  spt <AUDIO_PATH>\n  spt --force <AUDIO_PATH>\n\n输出：\n  在音频旁生成 <AUDIO_STEM>.md。默认不覆盖已有文件。\n\n支持格式：\n  aac, aif, aiff, caf, flac, m4a, m4b, mp3, oga, ogg, opus, wav, webm, wma\n\n示例：\n  spt \"/path/to/会议录音.m4a\"",
+        ),
+        "ocr" => Some(
+            "图片 OCR\n\n用法：\n  spt ocr <IMAGE_PATH>\n  spt ocr --force <IMAGE_PATH>\n\n输出：\n  在图片旁生成 <IMAGE_STEM>.ocr.md。\n\n支持格式：\n  png, jpg, jpeg, webp\n\n示例：\n  spt ocr \"/path/to/扫描件.png\"",
+        ),
+        "models" => Some(
+            "模型目录\n\n用法：\n  spt models [SEARCH]\n\n作用：\n  查询 OpenRouter 当前声明支持音频输入的模型；SEARCH 可按模型代号或名称过滤。\n\n示例：\n  spt models\n  spt models gemini\n  spt --model google/gemini-3.5-flash-lite",
+        ),
+        "providers" => Some(
+            "Provider 目录\n\n用法：\n  spt providers [MODEL_ID]\n\n作用：\n  列出指定模型的完整 endpoint tag；省略 MODEL_ID 时使用当前已保存模型。\n\n示例：\n  spt providers\n  spt providers google/gemini-3.5-flash-lite\n  spt --provider google-vertex/global\n  spt --provider any",
+        ),
+        "config" => Some(
+            "查看配置\n\n用法：\n  spt config\n\n作用：\n  显示配置文件位置、模型、provider、切分和安全预算等生效值。\n  只显示 OPENROUTER_API_KEY 是否已设置，绝不显示 Key 内容。\n\n持久修改：\n  spt --model <MODEL_ID>\n  spt --provider <ENDPOINT_TAG|any>",
+        ),
+        "help" => Some(
+            "指令帮助\n\n用法：\n  spt\n  spt --help\n  spt help [COMMAND]\n\n可选主题：\n  audio, ocr, models, providers, config, help\n\n帮助命令离线执行，不读取或修改 spt 配置。",
+        ),
+        _ => None,
+    }
 }
 
 fn apply_config_overrides(
@@ -253,4 +318,50 @@ fn print_config(config: &Config, path: &std::path::Path) {
     println!("max_total_turns={}", config.max_total_turns);
     println!("effective_transcription_parallel_requests=1");
     println!("OPENROUTER_API_KEY={key_status}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn root_help_contains_the_command_guide() {
+        let help = Cli::command().render_long_help().to_string();
+        assert!(help.contains("常用指令"));
+        assert!(help.contains("spt <AUDIO_PATH>"));
+        assert!(help.contains("spt --model <MODEL_ID>"));
+        assert!(help.contains("spt help [COMMAND]"));
+        assert!(help.contains("OPENROUTER_API_KEY"));
+    }
+
+    #[test]
+    fn explicit_help_command_accepts_a_topic() {
+        let cli = Cli::try_parse_from(["spt", "help", "ocr"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Help {
+                command: Some(ref command)
+            }) if command == "ocr"
+        ));
+    }
+
+    #[test]
+    fn bare_spt_parses_as_the_offline_guide_entrypoint() {
+        let cli = Cli::try_parse_from(["spt"]).unwrap();
+        assert!(cli.audio_path.is_none());
+        assert!(cli.command.is_none());
+        assert!(cli.model.is_none());
+        assert!(cli.provider.is_none());
+        assert!(!cli.force);
+    }
+
+    #[test]
+    fn every_documented_help_topic_has_a_chinese_guide() {
+        for topic in ["audio", "ocr", "models", "providers", "config", "help"] {
+            let guide = command_topic_guide(topic).unwrap();
+            assert!(guide.contains("用法："), "topic={topic}");
+            assert!(guide.contains("spt"), "topic={topic}");
+        }
+        assert!(command_topic_guide("unknown").is_none());
+    }
 }

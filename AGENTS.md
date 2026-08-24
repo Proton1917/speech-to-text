@@ -11,6 +11,7 @@ This repository contains the Rust backend/CLI for `spt`, an OpenRouter-powered s
 - `spt --provider <ENDPOINT_TAG>` persists one exact endpoint verified against the selected model's live catalog.
 - `spt --provider any` authorizes OpenRouter automatic routing; the API request must omit the `provider` field.
 - `spt ocr <IMAGE_PATH>` writes `<IMAGE_STEM>.ocr.md`.
+- `spt`, `spt --help`, and `spt help [COMMAND]` expose the built-in Chinese command guide without network or configuration mutation.
 - Existing output is never replaced without `--force`, and replacement happens only after the complete result is ready.
 - The API key is read only from `OPENROUTER_API_KEY`; never persist or log it.
 
@@ -70,3 +71,4 @@ Do not make paid OpenRouter calls in default tests. A live smoke test must be de
 
 - 2026-08-23: Created backend v0.1 from an empty directory with safe media validation, canonical audio, bounded OpenRouter transcription, OCR, atomic output and resource budgets.
 - 2026-08-23: Upgraded to v0.2 two-stage SpeakerHarness: 15-minute exact TARGET transcription, FFmpeg activity coverage, short reference/candidate identity packets, host-owned global IDs, sequential state transfer and v1-to-v2 migration. This replaced the initial single composite transcript packet after a real cross-boundary E2E exposed deterministic omitted speech. Frontend remains out of scope.
+- 2026-08-24: Released v0.2.1 with a built-in Chinese command guide for bare `spt`, `--help`, `help`, per-command help topics, examples, output behavior, persistent model/provider settings, and security notes.

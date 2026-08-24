@@ -62,6 +62,28 @@ export OPENROUTER_API_KEY="你的 OpenRouter API Key"
 
 ## CLI
 
+### 查看指令介绍
+
+直接运行以下任一命令即可查看内置中文指令表、常用示例、输出规则和安全说明：
+
+```bash
+spt
+spt --help
+spt help
+```
+
+查看指定功能：
+
+```bash
+spt help audio
+spt help ocr
+spt help models
+spt help providers
+spt help config
+```
+
+`spt help` 在配置加载前处理，不会访问 OpenRouter，也不会修改当前模型或 provider。
+
 ### 转写音频
 
 ```bash
