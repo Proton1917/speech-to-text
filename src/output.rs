@@ -12,6 +12,7 @@ use crate::config::Config;
 use crate::media::{AudioInfo, ImageInfo};
 use crate::openrouter::Completion;
 use crate::security::{secure_directory, secure_file};
+use crate::transcript::TranscriptMode;
 
 #[derive(Clone, Debug)]
 pub struct TranscriptPart {
@@ -94,6 +95,7 @@ pub fn render_transcript(
     config: &Config,
     info: &AudioInfo,
     parts: &[TranscriptPart],
+    mode: TranscriptMode,
 ) -> Result<String> {
     if parts.is_empty() {
         bail!("没有可写入的转写片段");
@@ -208,6 +210,11 @@ pub fn render_transcript(
         "source_container: {}\n",
         yaml_string(&info.container)?
     ));
+    markdown.push_str(&format!("transcript_mode: \"{}\"\n", mode.as_str()));
+    markdown.push_str(&format!(
+        "transcript_editing: \"{}\"\n",
+        mode.editing_policy()
+    ));
     markdown.push_str("chinese_script: \"zh-Hans\"\n");
     markdown.push_str("chinese_normalization: \"opencc-t2s\"\n");
     markdown.push_str(&format!("segments: {}\n", parts.len()));
@@ -263,7 +270,11 @@ pub fn render_transcript(
     ));
     markdown.push_str(&format!("reported_accepted_cost_usd: {cost:.9}\n"));
     markdown.push_str("---\n\n");
-    markdown.push_str(&format!("# {} 转写稿\n\n", escape_markdown_text(title)));
+    markdown.push_str(&format!(
+        "# {} {}\n\n",
+        escape_markdown_text(title),
+        mode.title()
+    ));
 
     for part in parts {
         markdown.push_str(&format!(
@@ -522,10 +533,30 @@ mod tests {
                 codec: "pcm_s16le".into(),
                 container: "wav".into(),
             },
-            &[part],
+            std::slice::from_ref(&part),
+            TranscriptMode::Quality,
         )
         .unwrap();
+        assert!(markdown.contains("transcript_mode: \"quality\""));
+        assert!(markdown.contains("transcript_editing: \"faithful_readability_cleanup\""));
+        assert!(markdown.contains("# meeting 高质量转写稿"));
         assert!(markdown.contains("chinese_script: \"zh-Hans\""));
         assert!(markdown.contains("chinese_normalization: \"opencc-t2s\""));
+
+        let raw_markdown = render_transcript(
+            Path::new("meeting.wav"),
+            &Config::default(),
+            &AudioInfo {
+                duration_ms: 1_000,
+                codec: "pcm_s16le".into(),
+                container: "wav".into(),
+            },
+            &[part],
+            TranscriptMode::Raw,
+        )
+        .unwrap();
+        assert!(raw_markdown.contains("transcript_mode: \"raw\""));
+        assert!(raw_markdown.contains("transcript_editing: \"verbatim\""));
+        assert!(raw_markdown.contains("# meeting 原始逐字稿"));
     }
 }

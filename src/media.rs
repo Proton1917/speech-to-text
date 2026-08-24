@@ -15,6 +15,7 @@ use tokio::process::Command as TokioCommand;
 
 use crate::config::Config;
 use crate::security::secure_file;
+use crate::transcript::TranscriptMode;
 
 const AUDIO_EXTENSIONS: &[&str] = &[
     "aac", "aif", "aiff", "caf", "flac", "m4a", "m4b", "mp3", "oga", "ogg", "opus", "wav", "webm",
@@ -318,11 +319,11 @@ fn webp_is_animated(path: &Path) -> Result<bool> {
     }
 }
 
-pub fn markdown_output_path(input: &Path) -> Result<PathBuf> {
+pub fn markdown_output_path(input: &Path, mode: TranscriptMode) -> Result<PathBuf> {
     validate_file_name(input)?;
     let canonical = fs::canonicalize(input)
         .with_context(|| format!("无法解析输入文件真实路径 {}", input.display()))?;
-    Ok(canonical.with_extension("md"))
+    Ok(canonical.with_extension(mode.output_extension()))
 }
 
 pub async fn canonicalize_audio(
@@ -1147,6 +1148,22 @@ mod tests {
         fs::write(&path, b"hello").unwrap();
         let error = validate_audio(&path).unwrap_err().to_string();
         assert!(error.contains("不支持的音频格式"));
+    }
+
+    #[test]
+    fn transcript_modes_use_distinct_output_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("meeting.part.m4a");
+        fs::write(&source, b"fixture").unwrap();
+        let canonical = fs::canonicalize(&source).unwrap();
+        assert_eq!(
+            markdown_output_path(&source, TranscriptMode::Quality).unwrap(),
+            canonical.with_extension("md")
+        );
+        assert_eq!(
+            markdown_output_path(&source, TranscriptMode::Raw).unwrap(),
+            canonical.with_extension("raw.md")
+        );
     }
 
     #[test]

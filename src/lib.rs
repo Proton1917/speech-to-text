@@ -6,3 +6,4 @@ pub mod output;
 pub mod pipeline;
 pub mod security;
 pub mod speaker;
+pub mod transcript;

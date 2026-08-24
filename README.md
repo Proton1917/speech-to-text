@@ -1,10 +1,13 @@
 # spt
 
-`spt` 是一个以 OpenRouter 多模态模型为核心的 Rust 语音转文字 CLI。给出合法的本地音频路径后，它会在原文件旁生成同名 Markdown 文字稿：
+`spt` 是一个以 OpenRouter 多模态模型为核心的 Rust 语音转文字 CLI。默认生成清理口语冗余、但不总结或改变事实的高质量 Markdown；显式使用 `--raw` 才生成原始逐字稿：
 
 ```bash
 spt "/path/to/会议录音.m4a"
-# 输出：/path/to/会议录音.md
+# 输出：/path/to/会议录音.md（高质量版）
+
+spt --raw "/path/to/会议录音.m4a"
+# 输出：/path/to/会议录音.raw.md（原始逐字版）
 ```
 
 当前默认模型与 provider：
@@ -24,7 +27,7 @@ provider = google-vertex/global
   → FFprobe 检查真实媒体内容和流类型
   → FFmpeg 一次性解码成单声道 32 kHz 无损 FLAC 母版
   → 规划连续、无重叠的 15 分钟 TARGET
-  → 阶段 A 只把 exact TARGET 交给模型，生成正文、时间和片内 L1/L2
+  → 阶段 A 按 quality（默认）或 raw 模式处理 exact TARGET，生成正文、时间和片内 L1/L2
   → Rust 使用内置 OpenCC t2s 将中文正文确定性归一化为 zh-Hans
   → FFmpeg 能量覆盖提示发现明显空洞；异常时重听一次并记录 advisory
   → 阶段 B 把历史 S 参考、边界上下文和本片 L 候选合成短 MP3
@@ -88,11 +91,26 @@ spt help config
 ### 转写音频
 
 ```bash
+# 默认：高质量可读稿
 spt "会议录音.m4a"
+
+# 原始：保留语气词、卡顿、重复和自我修正
+spt --raw "会议录音.m4a"
+
 spt --force "会议录音.m4a"
+spt --raw --force "会议录音.m4a"
 ```
 
-默认拒绝覆盖已存在的 `会议录音.md`。只有明确传入 `--force` 才会在完整处理成功后原子替换。
+默认 quality 模式会清理无意义口头禅、结巴、卡顿、机械重复和被立即放弃的错误开头，补全自然标点；仍完整保留事实、数字、专名、观点、否定、条件、不确定性和任务要求，不总结、不改变立场、不重排内容、不合并不同 turn。
+
+`--raw` 模式保留语气词、口头禅、结巴、卡顿、重复、自我修正、错误开头和不完整句，只补充必要标点。高质量版与原始版使用独立输出路径，可以同时存在：
+
+```text
+会议录音.md       quality / faithful_readability_cleanup
+会议录音.raw.md   raw / verbatim
+```
+
+两种模式都默认拒绝覆盖各自已有的目标文件。只有明确传入 `--force`，才会在该模式完整处理成功后原子替换对应输出。
 
 支持的输入扩展名大小写不敏感：
 
@@ -227,7 +245,7 @@ spt ocr "扫描件.png"
   → 从清晰单人发言保存最多约 6 秒的母版范围
 
 第二段 TARGET 15:00–30:00
-  → 阶段 A 只听 exact TARGET，冻结完整正文和新的 L1/L2
+  → 阶段 A 只听 exact TARGET，按本次 quality/raw 模式冻结正文和新的 L1/L2
   → 阶段 B 在同一个短 packet 中听 S1/S2 参考与 L1/L2 候选
   → 只返回 L1→S2、L2→S1 等映射，不能改正文或时间
   → 新声音返回 NEW1，再由 Rust 分配为 S3
@@ -259,6 +277,7 @@ TARGET 按连续、无重叠的无损时间轴覆盖全部采样。阶段 A 的�
 文字稿以 Markdown front matter 记录：
 
 - 源文件名、真实 codec/container 和音频时长；
+- `transcript_mode` 与 `transcript_editing`，明确区分默认高质量稿和原始逐字稿；
 - 请求模型/provider，以及 API 有报告时的模型/provider；缺失时明确回落为请求值；
 - 分段数、被接受的模型响应数、API 已报告的 Token 使用量、reasoning tokens 和费用；
 - 每段的确定性音频边界。

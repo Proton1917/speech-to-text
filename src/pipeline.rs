@@ -17,11 +17,13 @@ use crate::speaker::{
     LocalSpeakerTurn, LocalTranscript, SpeakerChunkResult, SpeakerHarness, local_transcript_prompt,
     local_transcript_response_format, parse_local_transcript,
 };
+use crate::transcript::TranscriptMode;
 
 struct TranscriptionContext {
     client: OpenRouterClient,
     config: Config,
     workspace: PathBuf,
+    mode: TranscriptMode,
 }
 
 #[derive(Default)]
@@ -70,11 +72,16 @@ struct AcousticCoverageIssue {
     detail: String,
 }
 
-pub async fn transcribe(input: &Path, config: &Config, force: bool) -> Result<PathBuf> {
+pub async fn transcribe(
+    input: &Path,
+    config: &Config,
+    force: bool,
+    mode: TranscriptMode,
+) -> Result<PathBuf> {
     config.validate()?;
     ensure_media_tools_async().await?;
     let mut info = validate_audio_async(input).await?;
-    let output = markdown_output_path(input)?;
+    let output = markdown_output_path(input, mode)?;
     let output_transaction = AtomicOutput::begin(&output, force)?;
     let client = OpenRouterClient::from_environment(config.clone(), true)?;
     ensure_simplified_converter().context("无法准备简体中文归一化")?;
@@ -103,8 +110,9 @@ pub async fn transcribe(input: &Path, config: &Config, force: bool) -> Result<Pa
         );
     }
     eprintln!(
-        "将按顺序处理 {} 个 TARGET：每段最长 {} 秒，身份边界上下文 {} 秒",
+        "将按顺序处理 {} 个 TARGET：模式 {}，每段最长 {} 秒，身份边界上下文 {} 秒",
         chunks.len(),
+        mode.as_str(),
         config.chunk_seconds,
         config.overlap_seconds
     );
@@ -113,6 +121,7 @@ pub async fn transcribe(input: &Path, config: &Config, force: bool) -> Result<Pa
         client,
         config: config.clone(),
         workspace: workspace.path().to_owned(),
+        mode,
     };
     let mut harness = SpeakerHarness::new(config);
     let mut transcript_budget = TranscriptBudget::default();
@@ -141,7 +150,7 @@ pub async fn transcribe(input: &Path, config: &Config, force: bool) -> Result<Pa
         harness.known_speaker_ids().join(", ")
     );
 
-    let markdown = render_transcript(input, config, &info, &parts)?;
+    let markdown = render_transcript(input, config, &info, &parts, mode)?;
     output_transaction.commit(&markdown)?;
     Ok(output)
 }
@@ -289,7 +298,12 @@ async fn exact_target_stage(
     previous_tail: &str,
     future_stage_a_reserve: u32,
 ) -> Result<ExactTargetOutcome> {
-    let base_prompt = local_transcript_prompt(chunk, context.config.max_speakers, previous_tail);
+    let base_prompt = local_transcript_prompt(
+        chunk,
+        context.config.max_speakers,
+        previous_tail,
+        context.mode,
+    );
     let response_format =
         local_transcript_response_format(chunk.duration_ms(), context.config.max_speakers);
     let mut last_diagnostic = None;

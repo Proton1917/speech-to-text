@@ -7,6 +7,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 
 use spt::config::{ANY_PROVIDER, Config, ConfigLock, validate_model_id, validate_provider_id};
 use spt::openrouter::OpenRouterClient;
+use spt::transcript::TranscriptMode;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -16,7 +17,7 @@ use spt::openrouter::OpenRouterClient;
     long_about = "spt 使用 OpenRouter 音频多模态模型转写本地录音，并由 Rust SpeakerHarness 维护跨片段说话人编号。\n\n直接给出合法音频路径后，会在源文件同一目录生成同名 Markdown 文字稿。默认每 15 分钟切分；正文过长时从无损母版继续二分。模型和 provider 会持久保存，直到再次修改。",
     arg_required_else_help = false,
     disable_help_subcommand = true,
-    after_help = "常用指令：\n  spt <AUDIO_PATH>                         转写音频，在原位置生成同名 .md\n  spt --force <AUDIO_PATH>                 完整成功后原子替换已有文字稿\n  spt --model <MODEL_ID>                   持久设置 OpenRouter 模型\n  spt --provider <ENDPOINT_TAG|any>        持久设置精确 provider 或自动路由\n  spt models [SEARCH]                      列出支持音频的模型\n  spt providers [MODEL_ID]                 列出模型可用的 provider endpoints\n  spt config                               查看生效配置，不显示 API Key\n  spt ocr <IMAGE_PATH>                     OCR 单张图片，生成 *.ocr.md\n  spt help [COMMAND]                       显示完整介绍或指定子命令帮助\n\n示例：\n  spt \"会议录音.m4a\"\n  spt --model google/gemini-3.5-flash-lite\n  spt --provider google-vertex/global\n  spt help ocr\n\n说明：\n  - OPENROUTER_API_KEY 只从环境变量读取，不会写入配置。\n  - 中文转写会在写盘前由内置 OpenCC 确定性归一化为 zh-Hans。\n  - 默认不覆盖已有输出；只有 --force 会在完整结果就绪后原子替换。\n  - provider=any 是显式隐私降级；固定 provider 会要求 ZDR 并关闭 fallback。"
+    after_help = "常用指令：\n  spt <AUDIO_PATH>                         默认高质量稿，输出同名 .md\n  spt --raw <AUDIO_PATH>                   原始逐字稿，输出同名 .raw.md\n  spt --force <AUDIO_PATH>                 完整成功后原子替换已有目标稿件\n  spt --model <MODEL_ID>                   持久设置 OpenRouter 模型\n  spt --provider <ENDPOINT_TAG|any>        持久设置精确 provider 或自动路由\n  spt models [SEARCH]                      列出支持音频的模型\n  spt providers [MODEL_ID]                 列出模型可用的 provider endpoints\n  spt config                               查看生效配置，不显示 API Key\n  spt ocr <IMAGE_PATH>                     OCR 单张图片，生成 *.ocr.md\n  spt help [COMMAND]                       显示完整介绍或指定子命令帮助\n\n示例：\n  spt \"会议录音.m4a\"\n  spt --raw \"会议录音.m4a\"\n  spt --model google/gemini-3.5-flash-lite\n  spt --provider google-vertex/global\n\n说明：\n  - 默认 quality 只清理无意义口头禅、结巴和机械重复，不总结或更改事实。\n  - --raw 保留语气词、卡顿、重复、自我修正和不完整句。\n  - OPENROUTER_API_KEY 只从环境变量读取，不会写入配置。\n  - 中文转写会在写盘前由内置 OpenCC 确定性归一化为 zh-Hans。\n  - 默认不覆盖已有输出；只有 --force 会在完整结果就绪后原子替换。\n  - provider=any 是显式隐私降级；固定 provider 会要求 ZDR 并关闭 fallback。"
 )]
 struct Cli {
     /// 要转写的本地音频文件
@@ -34,6 +35,10 @@ struct Cli {
     /// 原子替换已经存在的 Markdown 输出
     #[arg(long, global = true)]
     force: bool,
+
+    /// 输出原始逐字稿到 *.raw.md；默认输出清理口语冗余的高质量稿
+    #[arg(long)]
+    raw: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -100,17 +105,24 @@ async fn run() -> Result<()> {
         && cli.model.is_none()
         && cli.provider.is_none()
         && !cli.force
+        && !cli.raw
     {
         print_command_help(None)?;
         return Ok(());
     }
     if let Some(Commands::Help { command }) = cli.command.as_ref() {
-        if cli.audio_path.is_some() || cli.model.is_some() || cli.provider.is_some() || cli.force {
-            bail!("spt help 不能与音频路径、配置选项或 --force 同时使用");
+        if cli.audio_path.is_some()
+            || cli.model.is_some()
+            || cli.provider.is_some()
+            || cli.force
+            || cli.raw
+        {
+            bail!("spt help 不能与音频路径、配置选项、--force 或 --raw 同时使用");
         }
         print_command_help(command.as_deref())?;
         return Ok(());
     }
+    validate_raw_scope(&cli)?;
     let (mut config, config_path, config_existed, config_migrated) = Config::load()?;
     let changed =
         apply_config_overrides(&mut config, cli.model.as_deref(), cli.provider.as_deref())?;
@@ -197,7 +209,12 @@ async fn run() -> Result<()> {
     }
 
     if let Some(audio_path) = cli.audio_path {
-        let output = spt::pipeline::transcribe(&audio_path, &config, cli.force).await?;
+        let mode = if cli.raw {
+            TranscriptMode::Raw
+        } else {
+            TranscriptMode::Quality
+        };
+        let output = spt::pipeline::transcribe(&audio_path, &config, cli.force, mode).await?;
         println!("{}", output.display());
         return Ok(());
     }
@@ -210,6 +227,16 @@ async fn run() -> Result<()> {
 
     Cli::command().print_help()?;
     println!();
+    Ok(())
+}
+
+fn validate_raw_scope(cli: &Cli) -> Result<()> {
+    if cli.raw && cli.command.is_some() {
+        bail!("--raw 只适用于音频转写，不能与子命令同时使用");
+    }
+    if cli.raw && cli.audio_path.is_none() {
+        bail!("--raw 需要同时提供音频路径");
+    }
     Ok(())
 }
 
@@ -232,7 +259,7 @@ fn print_command_help(command: Option<&str>) -> Result<()> {
 fn command_topic_guide(name: &str) -> Option<&'static str> {
     match name {
         "audio" | "transcribe" | "转写" => Some(
-            "音频转写\n\n用法：\n  spt <AUDIO_PATH>\n  spt --force <AUDIO_PATH>\n\n输出：\n  在音频旁生成 <AUDIO_STEM>.md。默认不覆盖已有文件。\n  中文正文在写盘前由内置 OpenCC t2s 归一化为 zh-Hans。\n\n支持格式：\n  aac, aif, aiff, caf, flac, m4a, m4b, mp3, oga, ogg, opus, wav, webm, wma\n\n示例：\n  spt \"/path/to/会议录音.m4a\"",
+            "音频转写\n\n用法：\n  spt <AUDIO_PATH>\n  spt --raw <AUDIO_PATH>\n  spt --force <AUDIO_PATH>\n\n输出：\n  默认生成 <AUDIO_STEM>.md 高质量稿，清理无意义口头禅、结巴和机械重复，但不总结或更改事实。\n  --raw 生成 <AUDIO_STEM>.raw.md 原始逐字稿，保留语气词、卡顿、重复、自我修正和不完整句。\n  两种输出可以同时存在，默认均不覆盖已有文件。\n  中文正文在写盘前由内置 OpenCC t2s 归一化为 zh-Hans。\n\n支持格式：\n  aac, aif, aiff, caf, flac, m4a, m4b, mp3, oga, ogg, opus, wav, webm, wma\n\n示例：\n  spt \"/path/to/会议录音.m4a\"\n  spt --raw \"/path/to/会议录音.m4a\"",
         ),
         "ocr" => Some(
             "图片 OCR\n\n用法：\n  spt ocr <IMAGE_PATH>\n  spt ocr --force <IMAGE_PATH>\n\n输出：\n  在图片旁生成 <IMAGE_STEM>.ocr.md。\n\n支持格式：\n  png, jpg, jpeg, webp\n\n示例：\n  spt ocr \"/path/to/扫描件.png\"",
@@ -330,6 +357,7 @@ mod tests {
         assert!(help.contains("常用指令"));
         assert!(help.contains("spt <AUDIO_PATH>"));
         assert!(help.contains("spt --model <MODEL_ID>"));
+        assert!(help.contains("spt --raw <AUDIO_PATH>"));
         assert!(help.contains("spt help [COMMAND]"));
         assert!(help.contains("OPENROUTER_API_KEY"));
         assert!(help.contains("zh-Hans"));
@@ -354,6 +382,25 @@ mod tests {
         assert!(cli.model.is_none());
         assert!(cli.provider.is_none());
         assert!(!cli.force);
+        assert!(!cli.raw);
+    }
+
+    #[test]
+    fn raw_flag_selects_an_audio_only_mode() {
+        let cli = Cli::try_parse_from(["spt", "--raw", "meeting.m4a"]).unwrap();
+        assert!(cli.raw);
+        assert_eq!(cli.audio_path, Some(PathBuf::from("meeting.m4a")));
+        assert!(cli.command.is_none());
+        validate_raw_scope(&cli).unwrap();
+    }
+
+    #[test]
+    fn raw_flag_is_rejected_without_audio_or_with_a_subcommand() {
+        let no_audio = Cli::try_parse_from(["spt", "--raw"]).unwrap();
+        assert!(validate_raw_scope(&no_audio).is_err());
+
+        let subcommand = Cli::try_parse_from(["spt", "--raw", "config"]).unwrap();
+        assert!(validate_raw_scope(&subcommand).is_err());
     }
 
     #[test]
