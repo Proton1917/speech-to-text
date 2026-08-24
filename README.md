@@ -43,6 +43,23 @@ provider                            = google-vertex/global
 
 ## 安装
 
+推荐通过项目官方 Homebrew tap 安装：
+
+```bash
+brew install Proton1917/tap/spt
+```
+
+升级与卸载：
+
+```bash
+brew upgrade Proton1917/tap/spt
+brew uninstall spt
+```
+
+Formula 从 GitHub 的不可变版本源码构建，自动安装运行时依赖 FFmpeg；构建、测试和安装过程都不需要 OpenRouter API Key。Key 仍只在实际转写时从当前进程的 `OPENROUTER_API_KEY` 环境变量读取，不会进入 Homebrew Formula、Cellar、GitHub Release 或配置文件。
+
+也可以从源码手动安装：
+
 要求：
 
 - Rust 1.90 或更新版本
