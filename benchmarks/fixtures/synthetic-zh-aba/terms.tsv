@@ -1,0 +1,5 @@
+# category<TAB>id<TAB>accepted exact variants separated by |
+number	budget_amount	四十二万元|42万元|420000元
+proper_name	project_code	阿尔法七号|阿尔法7号
+negation	no_launch	不要上线
+condition	budget_not_approved	如果预算没有批准|如果预算未批准

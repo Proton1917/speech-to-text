@@ -15,8 +15,8 @@ impl TranscriptMode {
 
     pub const fn editing_policy(self) -> &'static str {
         match self {
-            Self::Quality => "faithful_readability_cleanup",
-            Self::Raw => "verbatim",
+            Self::Quality => "protected_host_readability_cleanup_on_primary_asr",
+            Self::Raw => "unpolished_primary_asr_not_verbatim_guaranteed",
         }
     }
 
@@ -29,8 +29,8 @@ impl TranscriptMode {
 
     pub const fn title(self) -> &'static str {
         match self {
-            Self::Quality => "高质量转写稿",
-            Self::Raw => "原始逐字稿",
+            Self::Quality => "事实保护可读性清稿",
+            Self::Raw => "单路 ASR 原始输出稿",
         }
     }
 }
@@ -50,5 +50,15 @@ mod tests {
             TranscriptMode::Quality.editing_policy(),
             TranscriptMode::Raw.editing_policy()
         );
+        assert_eq!(
+            TranscriptMode::Quality.editing_policy(),
+            "protected_host_readability_cleanup_on_primary_asr"
+        );
+        assert_eq!(
+            TranscriptMode::Raw.editing_policy(),
+            "unpolished_primary_asr_not_verbatim_guaranteed"
+        );
+        assert_eq!(TranscriptMode::Quality.title(), "事实保护可读性清稿");
+        assert_eq!(TranscriptMode::Raw.title(), "单路 ASR 原始输出稿");
     }
 }

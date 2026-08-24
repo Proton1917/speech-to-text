@@ -1,0 +1,7 @@
+# Copy this directory under benchmarks/private/<case-id>/, then edit every value.
+case_id	private-example
+language	zh-CN
+unicode_normalization	NFC
+audio_path	audio.m4a
+provenance	private-local-not-committed
+speaker_sequence	A,B,A

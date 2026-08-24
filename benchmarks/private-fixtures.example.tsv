@@ -1,0 +1,3 @@
+# case_id<TAB>case_dir<TAB>audio_path
+# Paths are resolved relative to this manifest. Copy to private-fixtures.tsv before editing.
+private-example	private/private-example	private/private-example/audio.m4a

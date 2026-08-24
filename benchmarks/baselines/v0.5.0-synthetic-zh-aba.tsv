@@ -1,0 +1,29 @@
+# spt v0.5.0 pre-release synthetic baseline; one run per configuration, not a real-audio quality claim.
+field	quality_default	raw_default_3_7	raw_lite_control
+binary_version	spt 0.5.0	spt 0.5.0	spt 0.5.0
+git_base_commit	1cffb0c941c79648e400d65c4b249c66ffbd22b8	1cffb0c941c79648e400d65c4b249c66ffbd22b8	1cffb0c941c79648e400d65c4b249c66ffbd22b8
+git_dirty	true	true	true
+snapshot_boundary	early pre-release architecture snapshot	early pre-release architecture snapshot	early pre-release architecture snapshot
+case_id	synthetic-zh-aba	synthetic-zh-aba	synthetic-zh-aba
+audio_generation	macOS say Tingting-Meijia-Tingting	macOS say Tingting-Meijia-Tingting	macOS say Tingting-Meijia-Tingting
+source_duration_ms	11624	11624	11624
+pipeline_canonical_duration_ms	11648	11648	11648
+primary_asr	qwen/qwen3-asr-1.7b	qwen/qwen3-asr-1.7b	qwen/qwen3-asr-1.7b
+quality_asr	fish-audio/transcribe-1	not_applicable	not_applicable
+primary_provider_expected	deepinfra	deepinfra	deepinfra
+quality_provider_expected	fish-audio	not_applicable	not_applicable
+overlay_provider_configured	google-vertex/global	google-vertex/global	google-vertex/global
+overlay_model	google/gemini-3.7-flash	google/gemini-3.7-flash	google/gemini-3.5-flash-lite
+elapsed_ms	17665	17406	16470
+accounted_model_responses	4	3	3
+reported_accounted_cost_usd	0.003259811	0.001917623	0.000925890
+cer	0.000000	0.000000	0.000000
+number_exact_recall	1.000000	1.000000	1.000000
+proper_name_exact_recall	1.000000	1.000000	1.000000
+negation_exact_recall	1.000000	1.000000	1.000000
+condition_exact_recall	1.000000	1.000000	1.000000
+speaker_permutation_invariant_turn_accuracy	1.000000	1.000000	0.333333
+speaker_turn_error_rate	0.000000	0.000000	0.666667
+run_status	success	success	success
+sample_count	1	1	1
+limitation	synthetic voices only; no real-room noise	synthetic voices only; no real-room noise	synthetic voices only; no real-room noise

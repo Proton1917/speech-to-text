@@ -1,0 +1,12 @@
+[package]
+name = "spt-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "spt-bench"
+path = "src/spt-bench.rs"
+
+[dependencies]
+unicode-normalization = "0.1.24"

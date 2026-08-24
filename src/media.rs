@@ -1,6 +1,6 @@
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -26,6 +26,17 @@ const PROBE_STDOUT_LIMIT: usize = 1024 * 1024;
 const CHILD_STDERR_LIMIT: usize = 256 * 1024;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const FFMPEG_TIMEOUT: Duration = Duration::from_secs(3_600);
+const LOCAL_MEDIA_PROTOCOL_WHITELIST: &str = "file";
+const SOURCE_CANONICAL_DURATION_TOLERANCE_MS: u64 = 250;
+const TEMP_DISK_EMERGENCY_RESERVE_BYTES: u64 = 256 * 1024 * 1024;
+pub(crate) const MAX_IDENTITY_TURN_CANDIDATES: usize = 48;
+pub(crate) const MAX_IDENTITY_CANDIDATE_AUDIO_MS: u64 = 120_000;
+pub(crate) const MAX_IDENTITY_SAMPLE_MS: u64 = 10_000;
+pub(crate) const MIN_IDENTITY_CANDIDATE_MS: u64 = 1_000;
+pub(crate) const MIN_IDENTITY_REFERENCE_MS: u64 = 2_000;
+const MAX_IDENTITY_REFERENCES: usize = 32;
+const MAX_IDENTITY_BOUNDARY_MS: u64 = 30_000;
+const MAX_IDENTITY_SILENCE_MS: u64 = 5_000;
 
 #[derive(Clone, Debug)]
 pub struct AudioInfo {
@@ -40,6 +51,12 @@ pub struct ImageInfo {
     pub container: String,
     pub width: u64,
     pub height: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MediaKind {
+    Audio,
+    Image,
 }
 
 #[derive(Clone, Debug)]
@@ -251,6 +268,185 @@ pub async fn validate_image_async(path: &Path) -> Result<ImageInfo> {
         .context("图片探测任务异常终止")?
 }
 
+/// Copies one atomically opened local media object into the task-private
+/// workspace. All later probes, decodes and uploads must use the returned
+/// path, never reopen the user-controlled directory entry.
+pub async fn stage_local_media(
+    input: &Path,
+    work_dir: &Path,
+    maximum_bytes: u64,
+    kind: MediaKind,
+) -> Result<PathBuf> {
+    let input = input.to_owned();
+    let work_dir = work_dir.to_owned();
+    tokio::task::spawn_blocking(move || {
+        stage_local_media_sync(&input, &work_dir, maximum_bytes, kind)
+    })
+    .await
+    .context("本地媒体固定副本任务异常终止")?
+}
+
+fn stage_local_media_sync(
+    input: &Path,
+    work_dir: &Path,
+    maximum_bytes: u64,
+    kind: MediaKind,
+) -> Result<PathBuf> {
+    if maximum_bytes == 0 {
+        bail!("本地媒体固定副本字节上限必须大于 0");
+    }
+    validate_file_name(input)?;
+    let extension = input
+        .extension()
+        .and_then(OsStr::to_str)
+        .map(str::to_ascii_lowercase)
+        .context("媒体文件必须带有可识别的 UTF-8 扩展名")?;
+    let allowlist = match kind {
+        MediaKind::Audio => AUDIO_EXTENSIONS,
+        MediaKind::Image => IMAGE_EXTENSIONS,
+    };
+    if !allowlist.contains(&extension.as_str()) {
+        bail!("当前媒体入口不支持扩展名 .{extension}");
+    }
+
+    let mut source = open_local_media_nofollow(input)
+        .with_context(|| format!("无法安全打开本地媒体 {}", input.display()))?;
+    let metadata = source
+        .metadata()
+        .with_context(|| format!("无法读取已打开媒体信息 {}", input.display()))?;
+    if !metadata.is_file() {
+        bail!("本地媒体不是普通文件：{}", input.display());
+    }
+    if metadata.len() == 0 {
+        bail!("本地媒体为空：{}", input.display());
+    }
+    if metadata.len() > maximum_bytes {
+        bail!(
+            "本地媒体超过固定副本上限：{} > {} bytes",
+            metadata.len(),
+            maximum_bytes
+        );
+    }
+    let available = fs2::available_space(work_dir)
+        .with_context(|| format!("无法读取临时目录可用空间 {}", work_dir.display()))?;
+    let safe_copy_cap = maximum_bytes.min(
+        available
+            .checked_sub(TEMP_DISK_EMERGENCY_RESERVE_BYTES)
+            .context("临时卷未保留 256 MiB 紧急空间，拒绝复制本地媒体")?,
+    );
+    if metadata.len() > safe_copy_cap {
+        bail!(
+            "本地媒体大小 {} bytes 超过扣除紧急磁盘保留后的复制上限 {} bytes",
+            metadata.len(),
+            safe_copy_cap
+        );
+    }
+
+    let staged = work_dir.join(format!("source-input.{extension}"));
+    let mut destination = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&staged)
+        .with_context(|| format!("无法创建本地媒体固定副本 {}", staged.display()))?;
+    set_private_file_permissions(&destination)
+        .with_context(|| format!("无法设置固定副本权限 {}", staged.display()))?;
+    if let Err(error) = copy_open_media_bounded(&mut source, &mut destination, safe_copy_cap) {
+        drop(destination);
+        let _ = fs::remove_file(&staged);
+        return Err(error);
+    }
+    destination.flush().context("无法刷新本地媒体固定副本")?;
+    destination
+        .sync_all()
+        .context("无法持久化本地媒体固定副本")?;
+    Ok(staged)
+}
+
+fn copy_open_media_bounded(
+    source: &mut fs::File,
+    destination: &mut fs::File,
+    maximum_bytes: u64,
+) -> Result<u64> {
+    let read_limit = maximum_bytes
+        .checked_add(1)
+        .context("本地媒体固定副本上限溢出")?;
+    let copied = std::io::copy(&mut source.take(read_limit), destination)
+        .context("无法复制已固定的本地媒体")?;
+    if copied == 0 {
+        bail!("已打开的本地媒体在复制时为空");
+    }
+    if copied > maximum_bytes {
+        bail!("本地媒体在复制期间超过固定副本字节上限");
+    }
+    Ok(copied)
+}
+
+#[cfg(target_os = "macos")]
+fn open_local_media_nofollow(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    const O_NOFOLLOW_ANY: i32 = 0x2000_0000;
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW_ANY | libc::O_CLOEXEC)
+        .open(path)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_local_media_nofollow(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn open_local_media_nofollow(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x00000400;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x00200000;
+    const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x08000000;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN)
+        .open(path)?;
+    if file.metadata()?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "media path is a Windows reparse point",
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_local_media_nofollow(path: &Path) -> std::io::Result<fs::File> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "media path is a symbolic link",
+        ));
+    }
+    fs::File::open(path)
+}
+
+#[cfg(unix)]
+fn set_private_file_permissions(file: &fs::File) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    file.set_permissions(fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn set_private_file_permissions(_file: &fs::File) -> std::io::Result<()> {
+    Ok(())
+}
+
 fn reject_animated_image(path: &Path) -> Result<()> {
     let extension = path
         .extension()
@@ -321,31 +517,52 @@ fn webp_is_animated(path: &Path) -> Result<bool> {
 
 pub fn markdown_output_path(input: &Path, mode: TranscriptMode) -> Result<PathBuf> {
     validate_file_name(input)?;
-    let canonical = fs::canonicalize(input)
-        .with_context(|| format!("无法解析输入文件真实路径 {}", input.display()))?;
-    Ok(canonical.with_extension(mode.output_extension()))
+    let parent = input
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let canonical_parent = fs::canonicalize(parent)
+        .with_context(|| format!("无法解析输入目录真实路径 {}", parent.display()))?;
+    let file_name = input.file_name().context("输入路径缺少文件名")?;
+    Ok(canonical_parent
+        .join(file_name)
+        .with_extension(mode.output_extension()))
 }
 
 pub async fn canonicalize_audio(
     input: &Path,
     work_dir: &Path,
     max_temp_bytes: u64,
+    expected_duration_ms: u64,
 ) -> Result<(PathBuf, AudioInfo)> {
     let output = work_dir.join("canonical.flac");
+    let format_whitelist = input_format_whitelist(input)?;
     let available = fs2::available_space(work_dir)
         .with_context(|| format!("无法读取临时目录可用空间 {}", work_dir.display()))?;
     let reserve = 256 * 1024 * 1024_u64;
     if available <= reserve + 64 * 1024 * 1024 {
         bail!("临时目录空间不足，无法安全生成无损母版");
     }
-    let effective_cap = max_temp_bytes.min(available - reserve);
+    let existing_workspace_bytes = workspace_regular_file_bytes(work_dir)?;
+    let remaining_task_budget = max_temp_bytes
+        .checked_sub(existing_workspace_bytes)
+        .context("本地媒体固定副本已耗尽 max_temp_bytes")?;
+    let effective_cap = remaining_task_budget.min(available - reserve);
+    if effective_cap <= 1024 * 1024 {
+        bail!("扣除本地媒体固定副本后，临时空间预算不足以生成无损母版");
+    }
     let max_file_size = effective_cap.to_string();
     run_ffmpeg([
         OsStr::new("-hide_banner"),
         OsStr::new("-loglevel"),
         OsStr::new("error"),
+        OsStr::new("-xerror"),
         OsStr::new("-nostdin"),
         OsStr::new("-y"),
+        OsStr::new("-format_whitelist"),
+        OsStr::new(format_whitelist),
+        OsStr::new("-protocol_whitelist"),
+        OsStr::new(LOCAL_MEDIA_PROTOCOL_WHITELIST),
         OsStr::new("-i"),
         input.as_os_str(),
         OsStr::new("-map"),
@@ -381,10 +598,29 @@ pub async fn canonicalize_audio(
     let info = validate_audio_async(&output)
         .await
         .context("无损音频母版校验失败")?;
+    validate_canonical_duration(input, expected_duration_ms, info.duration_ms)?;
     if info.duration_ms < 250 {
         bail!("音频时长必须至少为 0.25 秒");
     }
     Ok((output, info))
+}
+
+fn workspace_regular_file_bytes(work_dir: &Path) -> Result<u64> {
+    fs::read_dir(work_dir)
+        .with_context(|| format!("无法读取临时工作目录 {}", work_dir.display()))?
+        .try_fold(0_u64, |total, entry| {
+            let entry = entry.context("无法读取临时工作目录项")?;
+            let metadata = entry
+                .metadata()
+                .with_context(|| format!("无法读取临时文件信息 {}", entry.path().display()))?;
+            if metadata.is_file() {
+                total
+                    .checked_add(metadata.len())
+                    .context("临时工作目录字节计数溢出")
+            } else {
+                Ok(total)
+            }
+        })
 }
 
 pub fn prepare_audio_chunks(
@@ -401,21 +637,8 @@ pub fn prepare_audio_chunks(
     let canonical_size = fs::metadata(input)
         .with_context(|| format!("无法读取无损母版大小 {}", input.display()))?
         .len();
-    let sample_with_silence_seconds = config
-        .speaker_reference_seconds
-        .saturating_add(config.speaker_reference_silence_seconds);
-    let alignment_packet_seconds = config
-        .overlap_seconds
-        .saturating_add(config.speaker_reference_silence_seconds)
-        .saturating_add(
-            sample_with_silence_seconds
-                .saturating_mul(config.max_speakers as u64)
-                .saturating_mul(3),
-        );
-    let maximum_packet_ms = config
-        .chunk_seconds
-        .max(alignment_packet_seconds)
-        .saturating_mul(1_000);
+    let alignment_packet_ms = maximum_alignment_packet_ms(config);
+    let maximum_packet_ms = (config.chunk_seconds.saturating_mul(1_000)).max(alignment_packet_ms);
     let estimated_packet_size = maximum_packet_ms.saturating_mul(9);
     let projected_size = canonical_size.saturating_add(estimated_packet_size);
     if projected_size > config.max_temp_bytes {
@@ -449,6 +672,31 @@ pub fn prepare_audio_chunks(
         });
     }
     Ok(chunks)
+}
+
+fn maximum_alignment_packet_ms(config: &Config) -> u64 {
+    let second_ms = 1_000_u64;
+    let chunk_ms = config.chunk_seconds.saturating_mul(second_ms);
+    let silence_ms = config
+        .speaker_reference_silence_seconds
+        .saturating_mul(second_ms);
+    let reference_ms = config.speaker_reference_seconds.saturating_mul(second_ms);
+    let reference_packet_ms = reference_ms
+        .saturating_add(silence_ms)
+        .saturating_mul(config.max_speakers as u64);
+    let candidate_count =
+        (chunk_ms / MIN_IDENTITY_CANDIDATE_MS).min(MAX_IDENTITY_TURN_CANDIDATES as u64);
+    let candidate_audio_ms = MAX_IDENTITY_CANDIDATE_AUDIO_MS
+        .min(chunk_ms)
+        .min(reference_ms.saturating_mul(candidate_count));
+    let candidate_silence_ms = silence_ms.saturating_mul(candidate_count);
+    config
+        .overlap_seconds
+        .saturating_mul(second_ms)
+        .saturating_add(silence_ms)
+        .saturating_add(reference_packet_ms)
+        .saturating_add(candidate_audio_ms)
+        .saturating_add(candidate_silence_ms)
 }
 
 fn plan_chunk_boundaries(duration_ms: u64, chunk_ms: u64, minimum_tail_ms: u64) -> Vec<u64> {
@@ -511,12 +759,17 @@ pub async fn detect_non_silent_ranges(
     input: &Path,
     duration_ms: u64,
 ) -> Result<Vec<NonSilentRange>> {
+    let format_whitelist = input_format_whitelist(input)?;
     let stderr = run_ffmpeg_capture_stderr([
         OsStr::new("-hide_banner"),
         OsStr::new("-nostdin"),
         OsStr::new("-nostats"),
         OsStr::new("-loglevel"),
         OsStr::new("info"),
+        OsStr::new("-format_whitelist"),
+        OsStr::new(format_whitelist),
+        OsStr::new("-protocol_whitelist"),
+        OsStr::new(LOCAL_MEDIA_PROTOCOL_WHITELIST),
         OsStr::new("-i"),
         input.as_os_str(),
         OsStr::new("-af"),
@@ -537,9 +790,7 @@ pub async fn build_speaker_packet(
     silence_ms: u64,
     output: &Path,
 ) -> Result<SpeakerPacket> {
-    if candidates.is_empty() {
-        bail!("身份映射 packet 至少需要一个本片候选声音");
-    }
+    validate_speaker_packet_limits(chunk, references, candidates, silence_ms)?;
     let mut reference_windows = Vec::with_capacity(references.len());
     let mut candidate_windows = Vec::with_capacity(candidates.len());
     let mut cursor_ms = 0_u64;
@@ -633,6 +884,74 @@ pub async fn build_speaker_packet(
     })
 }
 
+fn validate_speaker_packet_limits(
+    chunk: &MediaChunk,
+    references: &[SpeakerReferenceRange],
+    candidates: &[SpeakerReferenceRange],
+    silence_ms: u64,
+) -> Result<()> {
+    if chunk.audio_start_ms > chunk.start_ms || chunk.start_ms >= chunk.end_ms {
+        bail!("身份映射 packet 的 TARGET 时间范围无效");
+    }
+    if chunk.context_ms() > MAX_IDENTITY_BOUNDARY_MS {
+        bail!("身份映射 packet 的边界上下文超过 30 秒上限");
+    }
+    if silence_ms > MAX_IDENTITY_SILENCE_MS {
+        bail!("身份映射 packet 的样本间静音超过 5 秒上限");
+    }
+    if references.len() > MAX_IDENTITY_REFERENCES {
+        bail!("身份映射 packet 的历史参考超过 32 个上限");
+    }
+    if candidates.is_empty() {
+        bail!("身份映射 packet 至少需要一个本片候选声音");
+    }
+    if candidates.len() > MAX_IDENTITY_TURN_CANDIDATES {
+        bail!("身份映射 packet 的逐 turn 候选超过 48 个上限");
+    }
+
+    let mut reference_ids = std::collections::BTreeSet::new();
+    for reference in references {
+        let duration_ms = reference.end_ms.saturating_sub(reference.start_ms);
+        if !(MIN_IDENTITY_REFERENCE_MS..=MAX_IDENTITY_SAMPLE_MS).contains(&duration_ms) {
+            bail!("身份映射 packet 的历史参考时长越界");
+        }
+        if !reference_ids.insert(reference.speaker_id.as_str()) {
+            bail!("身份映射 packet 包含重复历史参考编号");
+        }
+    }
+
+    let mut candidate_ids = std::collections::BTreeSet::new();
+    let mut candidate_audio_ms = 0_u64;
+    for candidate in candidates {
+        let duration_ms = candidate.end_ms.saturating_sub(candidate.start_ms);
+        if !(MIN_IDENTITY_CANDIDATE_MS..=MAX_IDENTITY_SAMPLE_MS).contains(&duration_ms) {
+            bail!("身份映射 packet 的逐 turn 候选时长越界");
+        }
+        if candidate.start_ms < chunk.start_ms || candidate.end_ms > chunk.end_ms {
+            bail!("身份映射 packet 的逐 turn 候选超出 exact TARGET");
+        }
+        if !valid_turn_key(&candidate.speaker_id)
+            || !candidate_ids.insert(candidate.speaker_id.as_str())
+        {
+            bail!("身份映射 packet 包含非法或重复的 host TURN 编号");
+        }
+        candidate_audio_ms = candidate_audio_ms.saturating_add(duration_ms);
+    }
+    if candidate_audio_ms > MAX_IDENTITY_CANDIDATE_AUDIO_MS {
+        bail!("身份映射 packet 的逐 turn 候选音频超过 120 秒上限");
+    }
+    Ok(())
+}
+
+fn valid_turn_key(key: &str) -> bool {
+    key.len() <= 32
+        && key.strip_prefix('T').is_some_and(|number| {
+            !number.is_empty()
+                && !number.starts_with('0')
+                && number.chars().all(|character| character.is_ascii_digit())
+        })
+}
+
 fn append_packet_range(
     args: &mut Vec<OsString>,
     source_path: &Path,
@@ -645,7 +964,12 @@ fn append_packet_range(
         bail!("声音样本 {} 的音频范围无效", range.speaker_id);
     }
     let duration_ms = range.end_ms - range.start_ms;
+    let format_whitelist = input_format_whitelist(source_path)?;
     args.extend([
+        OsString::from("-format_whitelist"),
+        OsString::from(format_whitelist),
+        OsString::from("-protocol_whitelist"),
+        OsString::from(LOCAL_MEDIA_PROTOCOL_WHITELIST),
         OsString::from("-ss"),
         OsString::from(seconds_arg(range.start_ms)),
         OsString::from("-t"),
@@ -681,33 +1005,74 @@ fn append_packet_silence(
     *input_count += 1;
 }
 
-pub async fn normalize_image(input: &Path, work_dir: &Path) -> Result<PathBuf> {
+pub async fn normalize_image(
+    input: &Path,
+    work_dir: &Path,
+    max_temp_bytes: u64,
+) -> Result<PathBuf> {
     let output = work_dir.join("ocr-input.jpg");
-    run_ffmpeg([
-        OsStr::new("-hide_banner"),
-        OsStr::new("-loglevel"),
-        OsStr::new("error"),
-        OsStr::new("-nostdin"),
-        OsStr::new("-y"),
-        OsStr::new("-i"),
-        input.as_os_str(),
-        OsStr::new("-filter_complex"),
-        OsStr::new(
+    let format_whitelist = input_format_whitelist(input)?;
+    let existing = workspace_regular_file_bytes(work_dir)?;
+    let available = fs2::available_space(work_dir)
+        .with_context(|| format!("无法读取 OCR 临时目录空间 {}", work_dir.display()))?;
+    let output_cap = max_temp_bytes
+        .checked_sub(existing)
+        .context("OCR 固定输入副本已耗尽 max_temp_bytes")?
+        .min(
+            available
+                .checked_sub(TEMP_DISK_EMERGENCY_RESERVE_BYTES)
+                .context("OCR 临时卷未保留 256 MiB 紧急空间")?,
+        );
+    if output_cap <= 1024 * 1024 {
+        bail!("OCR 标准化图片的剩余临时空间预算不足");
+    }
+    let mut args = vec![
+        OsString::from("-hide_banner"),
+        OsString::from("-loglevel"),
+        OsString::from("error"),
+        OsString::from("-xerror"),
+        OsString::from("-err_detect"),
+        OsString::from("explode"),
+        OsString::from("-nostdin"),
+        OsString::from("-y"),
+        OsString::from("-format_whitelist"),
+        OsString::from(format_whitelist),
+        OsString::from("-protocol_whitelist"),
+        OsString::from(LOCAL_MEDIA_PROTOCOL_WHITELIST),
+    ];
+    if let Some(demuxer) = forced_image_demuxer(input) {
+        args.extend([OsString::from("-f"), OsString::from(demuxer)]);
+    }
+    args.extend([
+        OsString::from("-i"),
+        input.as_os_str().to_owned(),
+        OsString::from("-filter_complex"),
+        OsString::from(
             "[0:v:0]scale='min(4096,iw)':'min(4096,ih)':force_original_aspect_ratio=decrease,format=rgba,split=2[background][foreground];[background]drawbox=color=white:t=fill[white];[white][foreground]overlay=format=auto,format=rgb24[output]",
         ),
-        OsStr::new("-map"),
-        OsStr::new("[output]"),
-        OsStr::new("-frames:v"),
-        OsStr::new("1"),
-        OsStr::new("-map_metadata"),
-        OsStr::new("-1"),
-        OsStr::new("-q:v"),
-        OsStr::new("2"),
-        output.as_os_str(),
-    ])
-    .await
-    .context("OCR 图片标准化失败")?;
+        OsString::from("-map"),
+        OsString::from("[output]"),
+        OsString::from("-frames:v"),
+        OsString::from("1"),
+        OsString::from("-map_metadata"),
+        OsString::from("-1"),
+        OsString::from("-q:v"),
+        OsString::from("2"),
+        OsString::from("-fs"),
+        OsString::from(output_cap.to_string()),
+        output.as_os_str().to_owned(),
+    ]);
+    run_ffmpeg(args).await.context("OCR 图片标准化失败")?;
     secure_file(&output)?;
+    let output_size = fs::metadata(&output)
+        .with_context(|| format!("无法读取 OCR 标准化图片 {}", output.display()))?
+        .len();
+    if output_size >= output_cap.saturating_sub(1024 * 1024) {
+        bail!("OCR 标准化图片达到临时空间上限，已拒绝可能截断的输出");
+    }
+    validate_image_async(&output)
+        .await
+        .context("OCR 标准化 JPEG 完整性校验失败")?;
     Ok(output)
 }
 
@@ -719,6 +1084,7 @@ async fn encode_audio_range(
 ) -> Result<()> {
     let offset = seconds_arg(offset_ms);
     let duration = seconds_arg(duration_ms);
+    let format_whitelist = input_format_whitelist(input)?;
     run_ffmpeg([
         OsStr::new("-hide_banner"),
         OsStr::new("-loglevel"),
@@ -727,6 +1093,10 @@ async fn encode_audio_range(
         OsStr::new("-y"),
         OsStr::new("-ss"),
         OsStr::new(&offset),
+        OsStr::new("-format_whitelist"),
+        OsStr::new(format_whitelist),
+        OsStr::new("-protocol_whitelist"),
+        OsStr::new(LOCAL_MEDIA_PROTOCOL_WHITELIST),
         OsStr::new("-i"),
         input.as_os_str(),
         OsStr::new("-t"),
@@ -809,6 +1179,67 @@ fn validate_common(path: &Path, allowlist: &[&str], label: &str) -> Result<()> {
     Ok(())
 }
 
+fn input_format_whitelist(path: &Path) -> Result<&'static str> {
+    let extension = path
+        .extension()
+        .and_then(OsStr::to_str)
+        .map(str::to_ascii_lowercase)
+        .context("媒体文件必须带有可识别的 UTF-8 扩展名")?;
+    match extension.as_str() {
+        "aac" => Ok("aac"),
+        "aif" | "aiff" => Ok("aiff"),
+        "caf" => Ok("caf"),
+        "flac" => Ok("flac"),
+        "m4a" | "m4b" => Ok("mov,mp4,m4a,3gp,3g2,mj2"),
+        "mp3" => Ok("mp3"),
+        "oga" | "ogg" | "opus" => Ok("ogg"),
+        "wav" => Ok("wav"),
+        "webm" => Ok("matroska,webm"),
+        "wma" => Ok("asf"),
+        "jpeg" | "jpg" => Ok("jpeg_pipe"),
+        "png" => Ok("png_pipe"),
+        "webp" => Ok("webp_pipe"),
+        _ => bail!("扩展名 .{extension} 没有对应的安全媒体 demuxer；请使用受支持的本地媒体格式"),
+    }
+}
+
+fn forced_image_demuxer(path: &Path) -> Option<&'static str> {
+    match path
+        .extension()
+        .and_then(OsStr::to_str)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("jpeg" | "jpg") => Some("jpeg_pipe"),
+        Some("png") => Some("png_pipe"),
+        Some("webp") => Some("webp_pipe"),
+        _ => None,
+    }
+}
+
+fn validate_canonical_duration(input: &Path, expected_ms: u64, actual_ms: u64) -> Result<()> {
+    // Raw ADTS AAC has no indexed duration. FFprobe estimates it from bitrate and can be wrong by
+    // many seconds on valid VBR files, so a wide comparison tolerance would also hide real
+    // truncation. `-xerror` above makes decode errors fatal; for this one demuxer the completely
+    // decoded canonical FLAC is therefore the authoritative timeline.
+    if input
+        .extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("aac"))
+    {
+        return Ok(());
+    }
+    if expected_ms.abs_diff(actual_ms) > SOURCE_CANONICAL_DURATION_TOLERANCE_MS {
+        bail!(
+            "无损母版时长与源音频不一致：源音频 {:.3} 秒，母版 {:.3} 秒（容差 {:.3} 秒）；已拒绝可能截断或引用外部资源的输入",
+            expected_ms as f64 / 1_000.0,
+            actual_ms as f64 / 1_000.0,
+            SOURCE_CANONICAL_DURATION_TOLERANCE_MS as f64 / 1_000.0,
+        );
+    }
+    Ok(())
+}
+
 fn validate_file_name(path: &Path) -> Result<()> {
     let file_name = path
         .file_name()
@@ -828,16 +1259,25 @@ fn validate_file_name(path: &Path) -> Result<()> {
 }
 
 fn probe(path: &Path) -> Result<ProbeOutput> {
-    let mut child = Command::new("ffprobe")
-        .args([
+    let format_whitelist = input_format_whitelist(path)?;
+    let mut command = Command::new("ffprobe");
+    command.env_remove("OPENROUTER_API_KEY").args([
             "-v",
             "error",
+            "-format_whitelist",
+            format_whitelist,
+            "-protocol_whitelist",
+            LOCAL_MEDIA_PROTOCOL_WHITELIST,
             "-show_entries",
             "format=duration,format_name:stream=codec_type,codec_name,duration,duration_ts,time_base,width,height,nb_frames:stream_disposition=attached_pic",
             "-of",
             "json",
-            "-i",
-        ])
+        ]);
+    if let Some(demuxer) = forced_image_demuxer(path) {
+        command.args(["-f", demuxer, "-err_detect", "explode"]);
+    }
+    let mut child = command
+        .arg("-i")
         .arg(path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -901,6 +1341,7 @@ fn probe(path: &Path) -> Result<ProbeOutput> {
 
 fn ensure_tool(tool: &str) -> Result<()> {
     let mut child = Command::new(tool)
+        .env_remove("OPENROUTER_API_KEY")
         .arg("-version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -942,6 +1383,7 @@ where
 {
     let mut command = TokioCommand::new("ffmpeg");
     command
+        .env_remove("OPENROUTER_API_KEY")
         .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -1150,6 +1592,193 @@ mod tests {
         assert!(error.contains("不支持的音频格式"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn staging_rejects_terminal_symlinks_without_following_them() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("private.wav");
+        fs::write(&target, b"private audio bytes").unwrap();
+        let link = directory.path().join("input.wav");
+        symlink(&target, &link).unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+
+        assert!(stage_local_media_sync(&link, workspace.path(), 1024, MediaKind::Audio).is_err());
+        assert!(!workspace.path().join("source-input.wav").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_open_media_handle_is_stable_after_the_directory_entry_is_replaced() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("input.wav");
+        let moved = directory.path().join("opened.wav");
+        let replacement = directory.path().join("replacement.wav");
+        fs::write(&input, b"original-object").unwrap();
+        fs::write(&replacement, b"different-private-object").unwrap();
+
+        let canonical_input = fs::canonicalize(&input).unwrap();
+        let mut opened = open_local_media_nofollow(&canonical_input).unwrap();
+        fs::rename(&input, &moved).unwrap();
+        symlink(&replacement, &input).unwrap();
+        let output = directory.path().join("snapshot.wav");
+        let mut snapshot = fs::File::create(&output).unwrap();
+        copy_open_media_bounded(&mut opened, &mut snapshot, 1024).unwrap();
+
+        assert_eq!(fs::read(output).unwrap(), b"original-object");
+    }
+
+    #[test]
+    fn staging_enforces_the_copy_limit_even_for_a_valid_extension() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("large.wav");
+        fs::write(&input, vec![0_u8; 1025]).unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+
+        assert!(stage_local_media_sync(&input, workspace.path(), 1024, MediaKind::Audio).is_err());
+    }
+
+    #[test]
+    fn staging_rejects_the_wrong_media_kind_before_copying() {
+        let directory = tempfile::tempdir().unwrap();
+        let image = directory.path().join("large.jpg");
+        fs::write(&image, vec![0_u8; 1024]).unwrap();
+        let audio_workspace = tempfile::tempdir().unwrap();
+        assert!(
+            stage_local_media_sync(
+                &image,
+                audio_workspace.path(),
+                64 * 1024 * 1024,
+                MediaKind::Audio,
+            )
+            .is_err()
+        );
+        assert!(
+            fs::read_dir(audio_workspace.path())
+                .unwrap()
+                .next()
+                .is_none()
+        );
+
+        let audio = directory.path().join("voice.wav");
+        fs::write(&audio, vec![0_u8; 1024]).unwrap();
+        let image_workspace = tempfile::tempdir().unwrap();
+        assert!(
+            stage_local_media_sync(
+                &audio,
+                image_workspace.path(),
+                64 * 1024 * 1024,
+                MediaKind::Image,
+            )
+            .is_err()
+        );
+        assert!(
+            fs::read_dir(image_workspace.path())
+                .unwrap()
+                .next()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn allowed_extension_cannot_disguise_concat_or_open_nested_media() {
+        let directory = tempfile::tempdir().unwrap();
+        let nested = directory.path().join("nested.wav");
+        fs::write(&nested, b"nested input must never be opened").unwrap();
+        let disguised = directory.path().join("disguised.wav");
+        fs::write(
+            &disguised,
+            b"ffconcat version 1.0\nfile nested.wav\nduration 2.0\n",
+        )
+        .unwrap();
+
+        let error = validate_audio(&disguised).unwrap_err().to_string();
+        assert!(error.contains("文件内容不是合法媒体或已经损坏"));
+    }
+
+    #[tokio::test]
+    async fn real_jpeg_is_probed_normalized_and_revalidated() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.jpg");
+        let status = Command::new("ffmpeg")
+            .env_remove("OPENROUTER_API_KEY")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=blue:s=320x240:d=1",
+                "-frames:v",
+                "1",
+            ])
+            .arg(&source)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let info = validate_image(&source).unwrap();
+        assert_eq!((info.width, info.height), (320, 240));
+
+        let normalized = normalize_image(&source, directory.path(), 64 * 1024 * 1024)
+            .await
+            .unwrap();
+        let normalized_info = validate_image(&normalized).unwrap();
+        assert_eq!((normalized_info.width, normalized_info.height), (320, 240));
+    }
+
+    #[tokio::test]
+    async fn truncated_jpeg_is_rejected_before_ocr() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("truncated.jpg");
+        let status = Command::new("ffmpeg")
+            .env_remove("OPENROUTER_API_KEY")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=s=640x480:d=1",
+                "-frames:v",
+                "1",
+                "-q:v",
+                "2",
+            ])
+            .arg(&source)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let original_size = fs::metadata(&source).unwrap().len();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&source)
+            .unwrap()
+            .set_len(original_size * 30 / 100)
+            .unwrap();
+        assert!(
+            normalize_image(&source, directory.path(), 64 * 1024 * 1024)
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn canonical_duration_allows_only_narrow_container_rounding() {
+        let indexed = Path::new("source.m4a");
+        assert!(validate_canonical_duration(indexed, 10_000, 10_250).is_ok());
+        assert!(validate_canonical_duration(indexed, 10_000, 9_750).is_ok());
+        assert!(validate_canonical_duration(indexed, 10_000, 10_251).is_err());
+        assert!(validate_canonical_duration(indexed, 10_000, 9_749).is_err());
+        assert!(validate_canonical_duration(Path::new("source.aac"), 655_087, 600_192).is_ok());
+    }
+
     #[test]
     fn transcript_modes_use_distinct_output_paths() {
         let directory = tempfile::tempdir().unwrap();
@@ -1224,6 +1853,113 @@ mod tests {
         assert_eq!(right.context_ms(), 30_000);
     }
 
+    #[test]
+    fn packet_preflight_covers_all_bounded_turn_candidates_and_references() {
+        let config = Config {
+            overlap_seconds: 30,
+            max_speakers: 16,
+            speaker_reference_seconds: 2,
+            speaker_reference_silence_seconds: 5,
+            ..Config::default()
+        };
+        assert_eq!(maximum_alignment_packet_ms(&config), 483_000);
+
+        let short_chunk = Config {
+            chunk_seconds: 30,
+            overlap_seconds: 5,
+            min_chunk_seconds: 10,
+            max_speakers: 1,
+            speaker_reference_seconds: 10,
+            speaker_reference_silence_seconds: 5,
+            ..Config::default()
+        };
+        assert_eq!(maximum_alignment_packet_ms(&short_chunk), 205_000);
+
+        let global_maximum = Config {
+            chunk_seconds: 900,
+            overlap_seconds: 30,
+            max_speakers: 32,
+            speaker_reference_seconds: 10,
+            speaker_reference_silence_seconds: 5,
+            ..Config::default()
+        };
+        assert_eq!(maximum_alignment_packet_ms(&global_maximum), 875_000);
+    }
+
+    #[test]
+    fn speaker_packet_builder_rejects_candidate_count_and_audio_budget_overflow() {
+        let chunk = MediaChunk {
+            source_path: "canonical.flac".into(),
+            audio_start_ms: 0,
+            start_ms: 0,
+            end_ms: 200_000,
+            lineage: "limits".into(),
+        };
+        let too_many = (0..49)
+            .map(|index| SpeakerReferenceRange {
+                speaker_id: format!("T{}", index + 1),
+                start_ms: index * 2_000,
+                end_ms: (index + 1) * 2_000,
+            })
+            .collect::<Vec<_>>();
+        assert!(validate_speaker_packet_limits(&chunk, &[], &too_many, 1_000).is_err());
+
+        let too_long = (0..48)
+            .map(|index| SpeakerReferenceRange {
+                speaker_id: format!("T{}", index + 1),
+                start_ms: index * 3_000,
+                end_ms: (index + 1) * 3_000,
+            })
+            .collect::<Vec<_>>();
+        assert!(validate_speaker_packet_limits(&chunk, &[], &too_long, 1_000).is_err());
+
+        let valid = vec![SpeakerReferenceRange {
+            speaker_id: "T1".into(),
+            start_ms: 0,
+            end_ms: MIN_IDENTITY_CANDIDATE_MS,
+        }];
+        assert!(validate_speaker_packet_limits(&chunk, &[], &valid, 1_000).is_ok());
+        assert!(validate_speaker_packet_limits(&chunk, &[], &valid, 5_001).is_err());
+
+        let overlong_sample = vec![SpeakerReferenceRange {
+            speaker_id: "T1".into(),
+            start_ms: 0,
+            end_ms: 10_001,
+        }];
+        assert!(validate_speaker_packet_limits(&chunk, &[], &overlong_sample, 1_000).is_err());
+
+        let too_short_candidate = vec![SpeakerReferenceRange {
+            speaker_id: "T1".into(),
+            start_ms: 0,
+            end_ms: MIN_IDENTITY_CANDIDATE_MS - 1,
+        }];
+        assert!(validate_speaker_packet_limits(&chunk, &[], &too_short_candidate, 1_000).is_err());
+
+        let too_short_reference = vec![SpeakerReferenceRange {
+            speaker_id: "S1".into(),
+            start_ms: 0,
+            end_ms: MIN_IDENTITY_REFERENCE_MS - 1,
+        }];
+        assert!(
+            validate_speaker_packet_limits(&chunk, &too_short_reference, &valid, 1_000).is_err()
+        );
+        let valid_reference = vec![SpeakerReferenceRange {
+            speaker_id: "S1".into(),
+            start_ms: 0,
+            end_ms: MIN_IDENTITY_REFERENCE_MS,
+        }];
+        assert!(validate_speaker_packet_limits(&chunk, &valid_reference, &valid, 1_000).is_ok());
+
+        let long_context = MediaChunk {
+            source_path: "canonical.flac".into(),
+            audio_start_ms: 0,
+            start_ms: 30_001,
+            end_ms: 200_000,
+            lineage: "long-context".into(),
+        };
+        assert!(validate_speaker_packet_limits(&long_context, &[], &valid, 1_000).is_err());
+    }
+
     #[tokio::test]
     async fn speaker_packet_manifest_matches_encoded_audio() {
         let directory = tempfile::tempdir().unwrap();
@@ -1263,7 +1999,7 @@ mod tests {
                 end_ms: 3_000,
             }],
             &[SpeakerReferenceRange {
-                speaker_id: "L1".into(),
+                speaker_id: "T1".into(),
                 start_ms: 12_000,
                 end_ms: 15_000,
             }],
@@ -1299,7 +2035,7 @@ mod tests {
             &first_chunk,
             &[],
             &[SpeakerReferenceRange {
-                speaker_id: "L1".into(),
+                speaker_id: "T1".into(),
                 start_ms: 0,
                 end_ms: 3_000,
             }],
@@ -1313,5 +2049,118 @@ mod tests {
         assert_eq!(first_packet.candidates[0].start_ms, 0);
         assert_eq!(first_packet.candidates[0].end_ms, 3_000);
         assert_eq!(first_packet.total_duration_ms, 4_000);
+    }
+
+    #[tokio::test]
+    async fn canonicalization_rejects_a_shorter_duration_than_the_validated_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.wav");
+        let status = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=32000:duration=1",
+                "-ac",
+                "1",
+                "-codec:a",
+                "pcm_s16le",
+            ])
+            .arg(&source)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let expected = validate_audio(&source).unwrap().duration_ms;
+
+        canonicalize_audio(&source, directory.path(), 64 * 1024 * 1024, expected)
+            .await
+            .unwrap();
+        let error = canonicalize_audio(
+            &source,
+            directory.path(),
+            64 * 1024 * 1024,
+            expected + SOURCE_CANONICAL_DURATION_TOLERANCE_MS + 1,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("无损母版时长与源音频不一致"));
+    }
+
+    #[tokio::test]
+    async fn canonicalization_treats_truncated_faststart_m4a_decode_errors_as_fatal() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("truncated.m4a");
+        let status = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=32000:duration=4",
+                "-c:a",
+                "aac",
+                "-movflags",
+                "+faststart",
+            ])
+            .arg(&source)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let original_size = fs::metadata(&source).unwrap().len();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&source)
+            .unwrap()
+            .set_len(original_size * 65 / 100)
+            .unwrap();
+        let expected = validate_audio(&source).unwrap().duration_ms;
+        assert_eq!(expected, 4_000);
+
+        let result =
+            canonicalize_audio(&source, directory.path(), 64 * 1024 * 1024, expected).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn canonicalization_accepts_valid_vbr_adts_aac_with_inaccurate_probe_duration() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("vbr.aac");
+        let status = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=8000:duration=30",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "24k",
+                "-f",
+                "adts",
+            ])
+            .arg(&source)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let expected = validate_audio(&source).unwrap().duration_ms;
+
+        let (_, canonical_info) =
+            canonicalize_audio(&source, directory.path(), 64 * 1024 * 1024, expected)
+                .await
+                .unwrap();
+        assert!(expected.abs_diff(canonical_info.duration_ms) > 250);
+        assert!(canonical_info.duration_ms.abs_diff(30_000) <= 500);
     }
 }

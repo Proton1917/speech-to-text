@@ -1,0 +1,36 @@
+# spt v0.5.0 pre-release public-human baseline; one run per mode, not a meeting-quality claim.
+field	quality_default	raw_default
+binary_version	spt 0.5.0	spt 0.5.0
+git_base_commit	1cffb0c941c79648e400d65c4b249c66ffbd22b8	1cffb0c941c79648e400d65c4b249c66ffbd22b8
+git_dirty	true	true
+snapshot_boundary	pre-release live snapshot before final provenance and local-security hardening	pre-release live snapshot before final provenance and local-security hardening
+case_id	ascend-zh-aba	ascend-zh-aba
+dataset	CAiRE/ASCEND	CAiRE/ASCEND
+dataset_revision	737e9800ae31be9932ba8464c80366559bd28424	737e9800ae31be9932ba8464c80366559bd28424
+dataset_rows	main/test:400,904,401	main/test:400,904,401
+license	CC-BY-SA-4.0	CC-BY-SA-4.0
+audio_construction	human speaker 3, human speaker 17, human speaker 3; two inserted 0.8s silences	human speaker 3, human speaker 17, human speaker 3; two inserted 0.8s silences
+source_duration_ms	14800	14800
+pipeline_canonical_duration_ms	14800	14800
+primary_asr	qwen/qwen3-asr-1.7b	qwen/qwen3-asr-1.7b
+quality_asr	fish-audio/transcribe-1	not_applicable
+primary_provider_expected	deepinfra	deepinfra
+quality_provider_expected	fish-audio	not_applicable
+overlay_provider_configured	google-vertex/global	google-vertex/global
+quality_crosscheck_coverage	all_root_targets_checked	not_applicable
+quality_cleanup_turns	0	0
+overlay_model	google/gemini-3.7-flash	google/gemini-3.7-flash
+elapsed_ms	93986	16203
+accounted_model_responses	4	3
+reported_accounted_cost_usd	0.003443490	0.001943490
+cer	0.000000	0.000000
+number_exact_recall	NA	NA
+proper_name_exact_recall	NA	NA
+negation_exact_recall	NA	NA
+condition_exact_recall	NA	NA
+speaker_permutation_invariant_turn_accuracy	1.000000	1.000000
+speaker_turn_error_rate	0.000000	0.000000
+speaker_sequence	S1,S2,S1	S1,S2,S1
+run_status	success	success
+sample_count	1	1
+limitation	artificial splice of three clean human utterances; not continuous conversation, room audio, overlap, newcomer, or meeting	artificial splice of three clean human utterances; not continuous conversation, room audio, overlap, newcomer, or meeting

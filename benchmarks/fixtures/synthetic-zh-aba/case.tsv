@@ -1,0 +1,7 @@
+# key<TAB>value
+case_id	synthetic-zh-aba
+language	zh-CN
+unicode_normalization	NFC
+audio_path	audio.m4a
+provenance	macos-say-generated-not-committed
+speaker_sequence	A,B,A

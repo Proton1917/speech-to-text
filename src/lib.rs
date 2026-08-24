@@ -1,10 +1,11 @@
+pub mod asr;
 pub mod chinese;
+pub mod cleanup;
 pub mod config;
 pub mod media;
 pub mod openrouter;
 pub mod output;
 pub mod pipeline;
-pub mod quality;
 pub mod security;
 pub mod speaker;
 pub mod transcript;

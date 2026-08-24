@@ -1,0 +1,5 @@
+# category<TAB>id<TAB>accepted exact variants separated by |
+number	number_1	真实数字写法|语义等价的数字写法
+proper_name	name_1	真实专名
+negation	negation_1	完整否定短语
+condition	condition_1	完整条件短语

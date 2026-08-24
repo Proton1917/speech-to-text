@@ -2,91 +2,111 @@
 
 ## Scope
 
-This repository contains the Rust backend/CLI for `spt`, an OpenRouter-powered speech-to-text project. The frontend has not been started. Keep backend changes focused on local media validation, OpenRouter request orchestration, transcript generation, OCR, configuration, and CLI behavior.
+This repository contains the Rust backend and CLI for spt. The frontend has not started. Keep changes focused on validated local media, OpenRouter dedicated STT and Chat Audio orchestration, frozen transcript text, speaker overlays, OCR, configuration, Markdown output, benchmarks, and packaging.
 
 ## User-facing contract
 
-- `spt <AUDIO_PATH>` defaults to a faithful readability-cleaned quality transcript and writes `<AUDIO_STEM>.md` beside the source file.
-- `spt --raw <AUDIO_PATH>` preserves fillers, stutters, repetitions, self-corrections and incomplete speech, writing `<AUDIO_STEM>.raw.md` so both modes can coexist.
-- Default quality uses a cost-bounded cascade: the first TARGET is at most five minutes and uses Gemini 3.7 Flash as a reliable bootstrap; later TARGETs use Gemini 3.5 Flash Lite and upgrade only when flagged by the Rust quality gate. Raw never invokes the review route.
-- `spt --model <OPENROUTER_MODEL_ID>` persistently overrides both the base and effective quality-review model, preserving the single-model override contract.
-- `spt --quality-model <OPENROUTER_MODEL_ID>` persistently changes only the quality bootstrap/review model.
-- `spt --provider <ENDPOINT_TAG>` persists one exact endpoint verified against the selected model's live catalog.
-- `spt --provider any` authorizes OpenRouter automatic routing; the API request must omit the `provider` field.
-- `spt ocr <IMAGE_PATH>` writes `<IMAGE_STEM>.ocr.md`.
-- `spt`, `spt --help`, and `spt help [COMMAND]` expose the built-in Chinese command guide without network or configuration mutation.
-- Existing output is never replaced without `--force`, and replacement happens only after the complete result is ready.
-- The API key is read only from `OPENROUTER_API_KEY`; never persist or log it.
+- spt AUDIO_PATH writes AUDIO_STEM.md beside the source.
+- Default quality uses Primary STT on every root target, samples an independent Quality STT on the first and every fifth root target, and applies only presentation punctuation and adjacent-space cleanup. Agreement is not ground-truth verification.
+- spt --verify-all AUDIO_PATH runs the independent Quality STT on every root target for the current task; it is not persisted and cannot be combined with --raw.
+- spt --raw AUDIO_PATH writes AUDIO_STEM.raw.md, skips the second STT and quality cleanup, and does not claim provider-level verbatim disfluency preservation.
+- Validated Primary provider source is retained only while the current TARGET is processed for cross-ASR evidence and display projection. A fact-span-protected OpenCC display projection is the transcript authority rendered to Markdown; it is not byte-identical provider output. Chat Audio may segment turns and label voices but cannot change canonical fact characters.
+- spt --asr-model and --asr-provider persist the Primary STT route. asr-provider=any is an explicit privacy downgrade.
+- spt --quality-asr-model and --quality-asr-provider persist the quality cross-check route. quality-asr-provider=any is an explicit privacy downgrade.
+- spt --model sets both raw and quality overlay models; --quality-model may override only the quality overlay.
+- spt --provider persists the Chat Audio endpoint. any is an explicit privacy downgrade.
+- spt ocr IMAGE_PATH writes IMAGE_STEM.ocr.md.
+- Bare spt, --help, and help COMMAND are offline and do not mutate configuration.
+- The first non-help operation atomically writes the default v4 configuration and creates its sibling .config.lock when configuration is absent. Existing v1-v3 files migrate under that lock.
+- Existing output is never replaced without --force; replacement occurs only after the complete result is ready.
+- OPENROUTER_API_KEY is read only from the process environment and must never be persisted or logged.
 
-## Current external defaults
+## Current defaults
 
-Verified against the live OpenRouter catalog on 2026-08-24:
+Verified against the live OpenRouter catalog and a controlled synthetic fixture on 2026-08-24:
 
-```text
-base model           = google/gemini-3.5-flash-lite
-quality review model = google/gemini-3.7-flash
-provider             = google-vertex/global
-endpoint             = https://openrouter.ai/api/v1/chat/completions
-```
+~~~text
+Primary STT model       = qwen/qwen3-asr-1.7b
+Primary STT endpoint    = deepinfra
+Quality STT model       = fish-audio/transcribe-1
+Quality STT endpoint    = fish-audio
+Raw/quality overlay     = google/gemini-3.7-flash
+Overlay endpoint        = google-vertex/global
+STT API                 = https://openrouter.ai/api/v1/audio/transcriptions
+Chat API                = https://openrouter.ai/api/v1/chat/completions
+~~~
 
-Both models accept audio plus strict structured output on the fixed ZDR endpoint. Audio is sent as raw Base64 through `input_audio`; OCR uses the base model with a JPEG data URL. Re-check catalog and endpoint behavior before changing these defaults because OpenRouter routing can drift.
+The STT OpenAPI does not expose Chat provider.only. Fixed STT mode is therefore accepted only when the live catalog contains exactly one endpoint, its tag exactly matches configuration, and the same model/tag is present in the live ZDR catalog. Describe this as catalog-unique ZDR preflight, never as request-level pinning.
 
 ## Architecture
 
-- `src/main.rs`: Clap interface, persistent settings, catalog commands, process exit.
-- `src/chinese.rs`: embedded OpenCC t2s normalization for validated Stage A Chinese text; preserves turns containing Japanese kana.
-- `src/config.rs`: schema/defaults, route ID validation, private atomic TOML storage.
-- `src/media.rs`: filename/allowlist checks, canonical FLAC, exact TARGET audio, FFmpeg activity ranges, and short one-file identity packets.
-- `src/openrouter.rs`: HTTPS requests, secret header handling, retry classification, response parsing, catalog queries.
-- `src/quality.rs`: deterministic Chinese typography normalization and stable signals that decide whether a quality TARGET needs the stronger review route.
-- `src/speaker.rs`: strict local-turn and identity-mapping schemas, global S-ID allocation, bounded tail state, and clean reference ranges.
-- `src/transcript.rs`: explicit quality/raw mode contract, output suffixes, editing provenance, and titles.
-- `src/pipeline.rs`: base/review/identity orchestration, acoustic and quality gates, left-before-right adaptive splitting, and OCR.
-- `src/output.rs`: Markdown metadata/rendering and private atomic output.
+- src/main.rs: Clap interface, schema-v4 route settings, catalog commands, process exit.
+- src/asr.rs: Primary/Quality STT validation, pre-OpenCC source comparison, frozen display-text restoration and UNKNOWN fallback.
+- src/chinese.rs: embedded OpenCC t2s with fact-span and Japanese-kana preservation.
+- src/cleanup.rs: quality-only presentation punctuation cleanup; spoken disfluencies are signaled but preserved, with lexical projection audit and whole-turn fallback.
+- src/config.rs: defaults, v1-v3 migration, strict v4 validation, route ID validation, private atomic TOML storage.
+- src/media.rs: no-follow fixed input snapshots, demuxer/protocol validation, canonical FLAC duration checks, exact 120-second targets, FFmpeg activity ranges and bounded speaker packets.
+- src/openrouter.rs: bounded HTTPS, secret headers, retry classification, dedicated STT schemas, Chat schemas, live catalogs and route checks.
+- src/speaker.rs: strict turn schemas, per-turn T-to-S/NEW/UNKNOWN mapping, global S allocation, short candidate and long reference rules.
+- src/pipeline.rs: Primary STT, sampled or verify-all Quality STT, quality-only host cleanup, frozen turn overlay, SpeakerHarness, OCR and shared request budgets.
+- src/output.rs: honest front matter, atomic Markdown output and bounded ~/.spt output-lock shards.
+- src/transcript.rs: quality/raw output names and editing contracts.
+- benchmarks/: offline CER/fact/speaker metrics, paid-run guard, private fixtures and versioned baseline snapshots.
 
-FFmpeg is intentionally a subprocess boundary. Never interpolate paths into a shell command; continue passing every argument directly to `Command`/`tokio::process::Command`.
+FFmpeg is an intentional subprocess boundary. Pass paths as Command arguments; never interpolate them into a shell command.
 
 ## Safety invariants
 
-- Default transcription accepts only allowlisted, non-empty regular files whose contents contain an audio stream. Reject symlinks, fake extensions, and media with a real video stream.
-- OCR remains an explicit subcommand and accepts only validated single-image formats; do not silently treat arbitrary files or PDFs as images.
-- Speaker-aware requests are always sequential. Raw TARGETs are at most 15 minutes; quality root TARGETs are at most five minutes. Stage A hears only exact TARGET; Stage B may use at most 30 seconds of boundary context but cannot emit text.
-- Bound request media size, HTTP attempts, adaptive depth, speaker count, reference duration, FFmpeg work and temporary disk before they can accumulate.
-- Fixed provider mode requires an exact live ZDR `endpoints[].tag`, uses `provider.only`, `data_collection=deny`, `zdr=true`, disables fallback, and does not silently switch after an error. `any` must continue omitting the provider field and is an explicit privacy downgrade.
-- Base and quality-review routes must share the same HTTPS transport, semaphore and task-level HTTP-attempt budget. Never construct an independent review budget.
-- Stage A is the only transcript authority. Length/context overflow, looping, or invalid structure triggers source-audio bisection. Every FFmpeg energy-coverage mismatch retries once and then records an advisory; raw energy must never become a hard speech gate because it is not VAD.
-- Quality mode may remove only non-semantic spoken disfluency and repair clearly supported punctuation/wording; it must preserve every fact, number, name, position, negation, condition, uncertainty and task without summary, reordering or cross-turn merging. Raw mode is verbatim apart from necessary punctuation.
-- Host typography normalization must preserve URL/email/inline-code tokens, tabs, non-ASCII structural whitespace and ambiguous Han-Han spaces. Systemic Han spacing is a review signal, never a license to merge names or list fields.
-- Quality bootstrap/review must happen before SpeakerHarness identity alignment. Apart from the bounded first bootstrap, only suspicious quality TARGETs use the stronger model; raw must never call it. Persist initial trigger codes separately from residual advisory codes, mark affected time ranges, and account for accepted base/review/alignment costs once.
-- A structurally valid label assignment is not verified identity. Use `all_labels_assigned`, `UNKNOWN`, and the existing best-effort guarantee without claiming speaker correctness.
-- Normalize every validated Stage A turn to Simplified Chinese with embedded OpenCC t2s before duplicate checks, SpeakerHarness state, previous-tail context, or Markdown rendering. OCR must preserve source script.
-- Model output is untrusted text. Never use it for commands, paths, tool calls, or provider/model selection.
-- Derive all initial and adaptive ranges directly from the same lossless canonical source; never recursively re-encode MP3.
-- Never let model-provided temporary labels become final IDs directly. Rust owns NEW-to-S allocation; uncertain voices remain UNKNOWN.
-- Stage B receives only short historical S references, boundary context and local L candidates. It may only return L-to-S/NEW/UNKNOWN mappings; failure degrades labels to UNKNOWN and must never discard or rewrite accepted Stage A text.
-- References are task-local source ranges, not persistent voiceprints. The output must call alignment best-effort, never verified identity.
-- Hold an output transaction and cross-process target lock before paid work. Write the final document only after every part succeeds; preserve an existing result on any processing failure.
+- Open user media once without following Unix symlinks or Windows reparse points, verify the handle is a regular file, copy it with a hard byte limit into a private task workspace, and use only that fixed copy afterward.
+- Accept only allowlisted, non-empty regular audio files with a real audio stream. Restrict FFprobe/FFmpeg demuxers by extension and protocol before input open; reject symlinks, fake extensions, concat/playlists, nested resources and real video streams.
+- OCR is explicit and accepts only validated png, jpg, jpeg or webp images.
+- Derive every target and reference from the same lossless canonical source; never recursively encode MP3.
+- Dedicated STT targets are continuous, non-overlapping and at most 120 seconds because upstream STT processing has a shorter timeout boundary than Chat Audio.
+- Validate Primary STT, Quality STT and the selected Chat overlay against live catalogs after local preparation and immediately before the first paid request.
+- Fixed Chat mode uses provider.only, allow_fallbacks=false, require_parameters=true, data_collection=deny and zdr=true.
+- STT fixed mode must not pretend to send unsupported provider routing fields. Reject multiple-endpoint models until the public STT contract supports a real pin.
+- A fixed STT provider value is a catalog-unique expected endpoint, not an actual endpoint claim. Only a provider explicitly reported by the STT response may be recorded as reported/actual.
+- All clients share one authenticated HTTPS transport, semaphore and task-level HTTP-attempt ledger.
+- content_filter, SAFETY and policy errors are never retried. Error text reports the actual number of attempts.
+- Bound request media, response bytes, temporary disk, HTTP attempts, transcript bytes, turns, speakers, references and identity packet media before accumulation.
+- Validate Primary source, retain it only for the current TARGET, and create a fact-span-protected OpenCC display projection before freezing. Protected source glyphs are limited to recognized fact-label values, paired quotation/book-title contents, inline code, URLs/emails and explicit character designations. Unlabelled proper nouns follow normal OpenCC t2s conversion. Reject NUL, replacement characters and pathological repetition.
+- An empty Primary transcript skips turn overlay, Stage B and cleanup. Quality runs its independent STT only when that root target is sampled or --verify-all is active; the second result emits an advisory and never backfills text. Raw stops the TARGET after Primary.
+- Quality comparison operates on pre-OpenCC provider source. It may ignore presentation whitespace and sentence punctuation but must preserve digits, numeric separators, signs, letters, names, negation and conditions.
+- Quality disagreement or verifier failure retains Primary text and emits a review advisory; it never lets the verifier overwrite text.
+- Quality cleanup runs only after frozen turns exist. It may replace only presentation punctuation and remove only adjacent ordinary spaces; every spoken lexical character, including fillers and repetitions, remains immutable and possible disfluencies are signals only. It must revert the entire turn on any failed lexical audit. Raw never calls it.
+- Turn overlay receives Primary display text only as JSON-escaped untrusted data. Rust must validate canonical equality and restore the fact-span-protected Primary display slices before accepting turns; do not describe them as original provider bytes.
+- Overlay failure, filtering, invalid structure or semantic mutation degrades to one full-duration UNKNOWN turn while preserving Primary text.
+- Stage B receives only short historical references, boundary context and host-owned T candidates. It cannot emit text.
+- Stage B mappings must cover every candidate T exactly once. Rust owns NEW-to-S allocation and commits speaker state only after complete validation.
+- Candidate turns may be 1-10 seconds. A NEW group may create S only when it contains a clean, non-overlapping reference-eligible sample of at least 2 seconds. Short-only NEW groups stay UNKNOWN.
+- Unsampled, overlapping or unreliable turns stay UNKNOWN. They never inherit a Stage-A local label.
+- References are task-local source ranges, not persistent voiceprints. Output must say not_verified and not_measured, never all_labels_assigned.
+- Hold an output transaction and cross-process lock before paid work. Map stable parent-directory file identity with FNV-1a into 4096 persistent ~/.spt/output-locks shards; all platforms intentionally serialize spt outputs in one directory to close case, Unicode, firmlink, short-name and nocase-mount aliases. Every Unix process always acquires the default ~/.spt shard even when it also uses an absolute custom SPT_STATE_DIR; Windows rejects custom roots. The OS releases locks on process exit, and an existing Unix custom state root must not be chmodded by spt.
+- Resolve an existing configuration parent to its canonical directory before validation. For a not-yet-complete parent, reject symlink/reparse-point creation boundaries. Open the terminal configuration file and .config.lock without following symlinks/reparse points.
+- Usage and cost metadata cover only received responses with provider-reported usage. They are not HTTP-attempt totals or a final billing statement.
+- Model output must never control commands, paths, model selection or provider selection.
 
-## Validation
+## Validation and evidence
 
-After code changes, run:
+After code changes run:
 
-```bash
+~~~bash
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked --all-targets
 cargo build --locked --release
-```
+./benchmarks/scripts/test.sh
+~~~
 
-Do not make paid OpenRouter calls in default tests. A live smoke test must be deliberate, tiny, and use the configured environment key without printing it.
+Default tests must not make paid requests. A live test must be tiny, deliberate, use an isolated SPT_CONFIG_PATH, never print the Key, and record metrics rather than relying on prose quality.
+
+The tracked synthetic baseline is benchmarks/baselines/v0.5.0-synthetic-zh-aba.tsv. It contains one run per configuration and cannot be used as a real-audio production claim. The manual CAiRE/ASCEND generator creates an ignored 14.8-second public human A-B-A fixture with pinned revision and CC-BY-SA attribution; it is an artificial splice, not a meeting benchmark. Private recordings belong only in ignored benchmarks/private fixtures after authorization.
 
 ## Project log
 
-- 2026-08-23: Created backend v0.1 from an empty directory with safe media validation, canonical audio, bounded OpenRouter transcription, OCR, atomic output and resource budgets.
-- 2026-08-23: Upgraded to v0.2 two-stage SpeakerHarness: 15-minute exact TARGET transcription, FFmpeg activity coverage, short reference/candidate identity packets, host-owned global IDs, sequential state transfer and v1-to-v2 migration. This replaced the initial single composite transcript packet after a real cross-boundary E2E exposed deterministic omitted speech. Frontend remains out of scope.
-- 2026-08-24: Released v0.2.1 with a built-in Chinese command guide for bare `spt`, `--help`, `help`, per-command help topics, examples, output behavior, persistent model/provider settings, and security notes.
-- 2026-08-24: Released v0.2.2 with deterministic embedded OpenCC t2s normalization before transcript state/output, preventing per-chunk Traditional Chinese drift without another model call.
-- 2026-08-24: Released v0.3.0 with quality mode as the default `<stem>.md` contract and explicit `--raw` verbatim output at `<stem>.raw.md`, with independent locks, atomic replacement and provenance.
-- 2026-08-24: Added v0.4.0 adaptive quality review after a real transcript showed that a prompt-only quality label was insufficient. A bounded first 3.7 TARGET establishes the job; later Lite TARGETs are upgraded only on stable Rust signals. A 90-second E2E corrected key terms such as 脱敏/客户 while costing less than the Lite-only baseline; deterministic reviewed-text cleanup now removes the remaining known connector/pronoun stutters without changing general reduplication. Added schema v3 dual-model pins, shared budgets, trigger-versus-residual provenance, URL-safe typography repair, honest advisory headings, and fixed `spt providers MODEL_ID` plus config compare-and-swap bugs.
-- 2026-08-24: Published immutable `v0.4.0` and the official `Proton1917/homebrew-tap` Formula. The Formula builds the locked Rust source, depends on FFmpeg at runtime, deletes `OPENROUTER_API_KEY` in its offline test, and passed Homebrew style, strict online audit, source installation, linkage and `brew test` on Apple Silicon.
-- 2026-08-24: Added an `arm64_tahoe` relocatable Homebrew bottle for v0.4.0 after a clean-machine install exposed seven unnecessary source-build dependencies. Normal Apple Silicon Tahoe installs now pour the 3 MB compressed bottle and do not install Rust, LLVM, Python, Z3, libgit2 or pkgconf; FFmpeg remains an explicit runtime dependency. The Formula caveat only explains the required runtime `OPENROUTER_API_KEY`, its non-persistence boundary, and the `spt --help` entrypoint.
+- 2026-08-23: v0.1 created safe media validation, canonical audio, bounded OpenRouter calls, OCR and atomic output.
+- 2026-08-23: v0.2 separated exact-target transcript generation from short SpeakerHarness identity packets.
+- 2026-08-24: v0.2.1-v0.2.2 added the Chinese CLI guide and deterministic zh-Hans normalization.
+- 2026-08-24: v0.3.0 added independent quality and raw output paths.
+- 2026-08-24: v0.4.0 added the Gemini Lite/3.7 surface-gated cascade, schema v3 and Homebrew source/bottle delivery.
+- 2026-08-24: v0.5.0 replaced Gemini text authority with dedicated STT, added schema v4, sampled/verify-all cross-ASR evidence, fact-protected OpenCC display text, presentation-only cleanup, per-turn SpeakerHarness mapping, fixed no-follow input snapshots, canonical-duration checks, honest route/cost provenance, OCR rejected-response accounting and bounded ~/.spt lock shards. Release gates pass with 212 library tests, 11 CLI tests, 12 benchmark tests, strict Clippy, release build and Windows cross-build/link. One-run synthetic and pinned ASCEND human-splice A-B-A snapshots both recorded CER 0 and S1-S2-S1 on their narrow fixtures; neither is a meeting/DER claim, and real-meeting acceptance remains open.

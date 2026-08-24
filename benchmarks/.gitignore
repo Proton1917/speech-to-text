@@ -1,0 +1,8 @@
+/.build/
+/results/
+/private-fixtures.tsv
+/private/*
+!/private/README.md
+/public-fixtures/
+/fixtures/*/audio.*
+/fixtures/*/generation.tsv
