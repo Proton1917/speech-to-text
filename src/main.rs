@@ -5,9 +5,7 @@ use std::process::ExitCode;
 use anyhow::{Result, bail};
 use clap::{CommandFactory, Parser, Subcommand};
 
-use spt::config::{
-    ANY_PROVIDER, Config, ConfigLock, config_path, validate_model_id, validate_provider_id,
-};
+use spt::config::{ANY_PROVIDER, Config, ConfigLock, validate_model_id, validate_provider_id};
 use spt::openrouter::OpenRouterClient;
 
 #[derive(Debug, Parser)]
@@ -89,39 +87,37 @@ async fn main() -> ExitCode {
 
 async fn run() -> Result<()> {
     let cli = Cli::parse();
-    let intended_config_path = config_path()?;
-    let config_lock = ConfigLock::acquire(&intended_config_path)?;
-    let (mut config, config_path, config_existed) = Config::load()?;
-    let mut changed = false;
-
-    if let Some(model) = cli.model.as_deref() {
-        validate_model_id(model)?;
-        config.model = model.to_owned();
-        changed = true;
-    }
-    if let Some(provider) = cli.provider.as_deref() {
-        let normalized = if provider.eq_ignore_ascii_case(ANY_PROVIDER) {
-            ANY_PROVIDER
-        } else {
-            provider
-        };
-        validate_provider_id(normalized)?;
-        config.provider = normalized.to_owned();
-        changed = true;
-    }
+    let (mut config, config_path, config_existed, config_migrated) = Config::load()?;
+    let changed =
+        apply_config_overrides(&mut config, cli.model.as_deref(), cli.provider.as_deref())?;
     config.validate()?;
     if changed {
         OpenRouterClient::from_environment(config.clone(), false)?
             .validate_selection("audio")
             .await?;
     }
-    if changed || !config_existed {
-        config.save(&config_path)?;
+    if changed || !config_existed || config_migrated {
+        let config_lock = ConfigLock::acquire(&config_path)?;
+        let (mut latest, latest_path, latest_existed, latest_migrated) = Config::load()?;
+        apply_config_overrides(&mut latest, cli.model.as_deref(), cli.provider.as_deref())?;
+        latest.validate()?;
+        if changed && (latest.model != config.model || latest.provider != config.provider) {
+            bail!("配置在网络校验期间被其他进程修改，请重新执行本次设置命令");
+        }
+        if changed || !latest_existed || latest_migrated {
+            latest.save(&latest_path)?;
+        }
+        config = latest;
+        drop(config_lock);
         if changed {
             eprintln!("配置已保存：{}", config_path.display());
+        } else if config_migrated {
+            eprintln!(
+                "配置已迁移到 SpeakerHarness schema v2：{}",
+                config_path.display()
+            );
         }
     }
-    drop(config_lock);
 
     if let Some(command) = cli.command {
         if cli.audio_path.is_some() {
@@ -192,6 +188,30 @@ async fn run() -> Result<()> {
     Ok(())
 }
 
+fn apply_config_overrides(
+    config: &mut Config,
+    model: Option<&str>,
+    provider: Option<&str>,
+) -> Result<bool> {
+    let mut changed = false;
+    if let Some(model) = model {
+        validate_model_id(model)?;
+        config.model = model.to_owned();
+        changed = true;
+    }
+    if let Some(provider) = provider {
+        let normalized = if provider.eq_ignore_ascii_case(ANY_PROVIDER) {
+            ANY_PROVIDER
+        } else {
+            provider
+        };
+        validate_provider_id(normalized)?;
+        config.provider = normalized.to_owned();
+        changed = true;
+    }
+    Ok(changed)
+}
+
 fn reject_force(force: bool) -> Result<()> {
     if force {
         bail!("--force 只适用于音频转写或 OCR 输出");
@@ -210,6 +230,7 @@ fn print_config(config: &Config, path: &std::path::Path) {
     println!("model={}", config.model);
     println!("provider={}", config.provider);
     println!("chunk_seconds={}", config.chunk_seconds);
+    println!("overlap_seconds={}", config.overlap_seconds);
     println!("min_chunk_seconds={}", config.min_chunk_seconds);
     println!("max_output_tokens={}", config.max_output_tokens);
     println!("split_output_tokens={}", config.split_output_tokens);
@@ -218,5 +239,18 @@ fn print_config(config: &Config, path: &std::path::Path) {
     println!("max_adaptive_depth={}", config.max_adaptive_depth);
     println!("max_http_attempts={}", config.max_http_attempts);
     println!("max_temp_bytes={}", config.max_temp_bytes);
+    println!("max_speakers={}", config.max_speakers);
+    println!(
+        "speaker_reference_seconds={}",
+        config.speaker_reference_seconds
+    );
+    println!(
+        "speaker_reference_silence_seconds={}",
+        config.speaker_reference_silence_seconds
+    );
+    println!("speaker_context_chars={}", config.speaker_context_chars);
+    println!("max_transcript_bytes={}", config.max_transcript_bytes);
+    println!("max_total_turns={}", config.max_total_turns);
+    println!("effective_transcription_parallel_requests=1");
     println!("OPENROUTER_API_KEY={key_status}");
 }

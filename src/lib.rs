@@ -3,3 +3,5 @@ pub mod media;
 pub mod openrouter;
 pub mod output;
 pub mod pipeline;
+pub mod security;
+pub mod speaker;

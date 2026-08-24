@@ -30,9 +30,10 @@ The default model accepts audio and image input. Audio is sent as raw Base64 thr
 
 - `src/main.rs`: Clap interface, persistent settings, catalog commands, process exit.
 - `src/config.rs`: schema/defaults, route ID validation, private atomic TOML storage.
-- `src/media.rs`: filename/allowlist checks, FFprobe validation, lossless canonical FLAC generation, and one-generation MP3 ranges.
+- `src/media.rs`: filename/allowlist checks, canonical FLAC, exact TARGET audio, FFmpeg activity ranges, and short one-file identity packets.
 - `src/openrouter.rs`: HTTPS requests, secret header handling, retry classification, response parsing, catalog queries.
-- `src/pipeline.rs`: bounded concurrency, adaptive recursive audio splitting, timeline validation, OCR orchestration.
+- `src/speaker.rs`: strict local-turn and identity-mapping schemas, global S-ID allocation, bounded tail state, and clean reference ranges.
+- `src/pipeline.rs`: two-stage exact-transcript/identity orchestration, acoustic coverage gate, left-before-right adaptive splitting, and OCR.
 - `src/output.rs`: Markdown metadata/rendering and private atomic output.
 
 FFmpeg is intentionally a subprocess boundary. Never interpolate paths into a shell command; continue passing every argument directly to `Command`/`tokio::process::Command`.
@@ -41,11 +42,15 @@ FFmpeg is intentionally a subprocess boundary. Never interpolate paths into a sh
 
 - Default transcription accepts only allowlisted, non-empty regular files whose contents contain an audio stream. Reject symlinks, fake extensions, and media with a real video stream.
 - OCR remains an explicit subcommand and accepts only validated single-image formats; do not silently treat arbitrary files or PDFs as images.
-- Bound request media size, HTTP attempts, adaptive depth, active roots, FFmpeg work and temporary disk before they can accumulate.
-- Fixed provider mode requires an exact live `endpoints[].tag`, uses `provider.only`, disables fallback, and does not silently switch after an error.
-- Require a complete non-empty model response. Length/context overflow or clear looping triggers source-audio bisection; reaching the minimum duration without a reliable result fails the whole job.
+- Speaker-aware requests are always sequential. Each logical TARGET is at most 15 minutes. Stage A hears only exact TARGET; Stage B may use at most 30 seconds of boundary context but cannot emit text.
+- Bound request media size, HTTP attempts, adaptive depth, speaker count, reference duration, FFmpeg work and temporary disk before they can accumulate.
+- Fixed provider mode requires an exact live ZDR `endpoints[].tag`, uses `provider.only`, `data_collection=deny`, `zdr=true`, disables fallback, and does not silently switch after an error. `any` must continue omitting the provider field and is an explicit privacy downgrade.
+- Stage A is the only transcript authority. Length/context overflow, looping, or invalid structure triggers source-audio bisection. Every FFmpeg energy-coverage mismatch retries once and then records an advisory; raw energy must never become a hard speech gate because it is not VAD.
 - Model output is untrusted text. Never use it for commands, paths, tool calls, or provider/model selection.
 - Derive all initial and adaptive ranges directly from the same lossless canonical source; never recursively re-encode MP3.
+- Never let model-provided temporary labels become final IDs directly. Rust owns NEW-to-S allocation; uncertain voices remain UNKNOWN.
+- Stage B receives only short historical S references, boundary context and local L candidates. It may only return L-to-S/NEW/UNKNOWN mappings; failure degrades labels to UNKNOWN and must never discard or rewrite accepted Stage A text.
+- References are task-local source ranges, not persistent voiceprints. The output must call alignment best-effort, never verified identity.
 - Hold an output transaction and cross-process target lock before paid work. Write the final document only after every part succeeds; preserve an existing result on any processing failure.
 
 ## Validation
@@ -63,4 +68,5 @@ Do not make paid OpenRouter calls in default tests. A live smoke test must be de
 
 ## Project log
 
-- 2026-08-23: Created backend v0.1 from an empty directory. Added the Rust CLI, locked private model/provider configuration, strict audio/image validation, lossless canonical audio, five-minute bounded transcription, Token/length/loop-driven recursive bisection from the lossless source, crash-safe Markdown provenance, OCR, OpenRouter discovery/error routing, resource budgets, cancellation, documentation, tests, and release workflow. Frontend work remains out of scope for this milestone.
+- 2026-08-23: Created backend v0.1 from an empty directory with safe media validation, canonical audio, bounded OpenRouter transcription, OCR, atomic output and resource budgets.
+- 2026-08-23: Upgraded to v0.2 two-stage SpeakerHarness: 15-minute exact TARGET transcription, FFmpeg activity coverage, short reference/candidate identity packets, host-owned global IDs, sequential state transfer and v1-to-v2 migration. This replaced the initial single composite transcript packet after a real cross-boundary E2E exposed deterministic omitted speech. Frontend remains out of scope.

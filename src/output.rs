@@ -11,12 +11,17 @@ use tempfile::NamedTempFile;
 use crate::config::Config;
 use crate::media::{AudioInfo, ImageInfo};
 use crate::openrouter::Completion;
+use crate::security::{secure_directory, secure_file};
 
 #[derive(Clone, Debug)]
 pub struct TranscriptPart {
     pub start_ms: u64,
     pub end_ms: u64,
     pub completion: Completion,
+    pub auxiliary_completions: Vec<Completion>,
+    pub speaker_ids: Vec<String>,
+    pub turn_count: usize,
+    pub acoustic_coverage_warning: bool,
 }
 
 pub struct AtomicOutput {
@@ -102,38 +107,70 @@ pub fn render_transcript(
         .and_then(|name| name.to_str())
         .context("源文件缺少主文件名")?;
 
-    let models = parts
+    let completions = parts
         .iter()
-        .map(|part| part.completion.model.as_str())
+        .flat_map(|part| std::iter::once(&part.completion).chain(part.auxiliary_completions.iter()))
+        .collect::<Vec<_>>();
+    let models = completions
+        .iter()
+        .map(|completion| completion.model.as_str())
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>()
         .join(", ");
-    let providers = parts
+    let providers = completions
         .iter()
-        .map(|part| part.completion.provider.as_str())
+        .map(|completion| completion.provider.as_str())
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>()
         .join(", ");
-    let prompt_tokens = parts
+    let prompt_tokens = completions
         .iter()
-        .map(|part| part.completion.prompt_tokens)
+        .map(|completion| completion.prompt_tokens)
         .sum::<u64>();
-    let completion_tokens = parts
+    let completion_tokens = completions
         .iter()
-        .map(|part| part.completion.completion_tokens)
+        .map(|completion| completion.completion_tokens)
         .sum::<u64>();
-    let reasoning_tokens = parts
+    let reasoning_tokens = completions
         .iter()
-        .map(|part| part.completion.reasoning_tokens)
+        .map(|completion| completion.reasoning_tokens)
         .sum::<u64>();
     let visible_output_tokens = completion_tokens.saturating_sub(reasoning_tokens);
-    let cost = parts.iter().map(|part| part.completion.cost).sum::<f64>();
-    let usage_reported_for_all_segments = parts.iter().all(|part| part.completion.usage_reported);
-    let reasoning_tokens_reported_for_all_segments = parts
+    let cost = completions
         .iter()
-        .all(|part| part.completion.reasoning_tokens_reported);
+        .map(|completion| completion.cost)
+        .sum::<f64>();
+    let all_speaker_ids = parts
+        .iter()
+        .flat_map(|part| part.speaker_ids.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let unresolved_speaker_present = all_speaker_ids.iter().any(|speaker| speaker == "UNKNOWN");
+    let mut speaker_ids = all_speaker_ids
+        .into_iter()
+        .filter(|speaker| speaker != "UNKNOWN")
+        .collect::<Vec<_>>();
+    speaker_ids.sort_by_key(|speaker| {
+        speaker
+            .strip_prefix('S')
+            .and_then(|number| number.parse::<usize>().ok())
+            .unwrap_or(usize::MAX)
+    });
+    let speaker_alignment_status = if unresolved_speaker_present {
+        "unresolved_labels_present"
+    } else {
+        "structurally_resolved"
+    };
+    let acoustic_coverage_warning_present = parts.iter().any(|part| part.acoustic_coverage_warning);
+    let usage_reported_for_all_requests = completions
+        .iter()
+        .all(|completion| completion.usage_reported);
+    let reasoning_tokens_reported_for_all_requests = completions
+        .iter()
+        .all(|completion| completion.reasoning_tokens_reported);
 
     let mut markdown = String::new();
     markdown.push_str("---\n");
@@ -145,6 +182,14 @@ pub fn render_transcript(
     markdown.push_str(&format!(
         "provider_requested: {}\n",
         yaml_string(&config.provider)?
+    ));
+    markdown.push_str(&format!(
+        "provider_privacy_mode: {}\n",
+        yaml_string(if config.uses_any_provider() {
+            "any_explicit_privacy_downgrade"
+        } else {
+            "fixed_zdr_data_collection_denied"
+        })?
     ));
     markdown.push_str(&format!(
         "model_reported_or_requested: {}\n",
@@ -165,10 +210,46 @@ pub fn render_transcript(
     ));
     markdown.push_str(&format!("segments: {}\n", parts.len()));
     markdown.push_str(&format!(
-        "usage_reported_for_all_segments: {usage_reported_for_all_segments}\n"
+        "accepted_model_responses: {}\n",
+        completions.len()
     ));
     markdown.push_str(&format!(
-        "reasoning_tokens_reported_for_all_segments: {reasoning_tokens_reported_for_all_segments}\n"
+        "speaker_turns: {}\n",
+        parts.iter().map(|part| part.turn_count).sum::<usize>()
+    ));
+    markdown.push_str("speaker_tracking: \"openrouter-two-stage-reference-harness-v2\"\n");
+    markdown.push_str("speaker_identity_scope: \"whole_job\"\n");
+    markdown.push_str("speaker_identity_guarantee: \"best_effort\"\n");
+    markdown.push_str("speaker_id_assignment: \"host_managed\"\n");
+    markdown.push_str("speaker_names_inferred: false\n");
+    markdown.push_str(&format!(
+        "speaker_alignment_status: \"{speaker_alignment_status}\"\n"
+    ));
+    markdown.push_str(&format!(
+        "acoustic_coverage_status: \"{}\"\n",
+        if acoustic_coverage_warning_present {
+            "ffmpeg_energy_advisory_warning"
+        } else {
+            "ffmpeg_energy_advisory_passed"
+        }
+    ));
+    markdown.push_str(&format!(
+        "speaker_overlap_seconds: {}\n",
+        config.overlap_seconds
+    ));
+    markdown.push_str(&format!(
+        "unresolved_speaker_present: {unresolved_speaker_present}\n"
+    ));
+    markdown.push_str(&format!("speaker_count: {}\n", speaker_ids.len()));
+    markdown.push_str(&format!(
+        "speaker_ids: {}\n",
+        serde_json::to_string(&speaker_ids).context("无法序列化说话人列表")?
+    ));
+    markdown.push_str(&format!(
+        "usage_reported_for_all_accepted_responses: {usage_reported_for_all_requests}\n"
+    ));
+    markdown.push_str(&format!(
+        "reasoning_tokens_reported_for_all_accepted_responses: {reasoning_tokens_reported_for_all_requests}\n"
     ));
     markdown.push_str(&format!("reported_prompt_tokens: {prompt_tokens}\n"));
     markdown.push_str(&format!(
@@ -180,7 +261,7 @@ pub fn render_transcript(
     ));
     markdown.push_str(&format!("reported_accepted_cost_usd: {cost:.9}\n"));
     markdown.push_str("---\n\n");
-    markdown.push_str(&format!("# {title} 转写稿\n\n"));
+    markdown.push_str(&format!("# {} 转写稿\n\n", escape_markdown_text(title)));
 
     for part in parts {
         markdown.push_str(&format!(
@@ -209,10 +290,15 @@ pub fn render_ocr(
         .and_then(|name| name.to_str())
         .context("源文件缺少主文件名")?;
     Ok(format!(
-        "---\nsource: {}\nmodel_requested: {}\nprovider_requested: {}\nmodel_reported_or_requested: {}\nprovider_reported_or_requested: {}\nsource_codec: {}\nsource_container: {}\nsource_width: {}\nsource_height: {}\nusage_reported: {}\nreasoning_tokens_reported: {}\nreported_prompt_tokens: {}\nreported_completion_tokens: {}\nreported_reasoning_tokens: {}\nreported_visible_output_tokens: {}\nreported_accepted_cost_usd: {:.9}\n---\n\n# {} OCR\n\n{}\n",
+        "---\nsource: {}\nmodel_requested: {}\nprovider_requested: {}\nprovider_privacy_mode: {}\nmodel_reported_or_requested: {}\nprovider_reported_or_requested: {}\nsource_codec: {}\nsource_container: {}\nsource_width: {}\nsource_height: {}\nusage_reported: {}\nreasoning_tokens_reported: {}\nreported_prompt_tokens: {}\nreported_completion_tokens: {}\nreported_reasoning_tokens: {}\nreported_visible_output_tokens: {}\nreported_accepted_cost_usd: {:.9}\n---\n\n# {} OCR\n\n{}\n",
         yaml_string(file_name)?,
         yaml_string(&config.model)?,
         yaml_string(&config.provider)?,
+        yaml_string(if config.uses_any_provider() {
+            "any_explicit_privacy_downgrade"
+        } else {
+            "fixed_zdr_data_collection_denied"
+        })?,
         yaml_string(&completion.model)?,
         yaml_string(&completion.provider)?,
         yaml_string(&info.codec)?,
@@ -226,17 +312,19 @@ pub fn render_ocr(
         completion.reasoning_tokens,
         completion.visible_output_tokens(),
         completion.cost,
-        title,
-        completion.text.trim(),
+        escape_markdown_text(title),
+        escape_markdown_text(completion.text.trim()),
     ))
 }
 
 pub fn ocr_output_path(input: &Path) -> Result<PathBuf> {
-    let stem = input
+    let canonical = fs::canonicalize(input)
+        .with_context(|| format!("无法解析 OCR 输入真实路径 {}", input.display()))?;
+    let stem = canonical
         .file_stem()
         .and_then(|name| name.to_str())
         .context("OCR 源文件缺少有效主文件名")?;
-    Ok(input.with_file_name(format!("{stem}.ocr.md")))
+    Ok(canonical.with_file_name(format!("{stem}.ocr.md")))
 }
 
 pub fn write_private_atomic(path: &Path, content: &str, force: bool) -> Result<()> {
@@ -280,6 +368,24 @@ fn yaml_string(value: &str) -> Result<String> {
     serde_json::to_string(value).context("无法转义 Markdown 元数据")
 }
 
+pub fn escape_markdown_text(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '\\' | '`' | '*' | '_' | '{' | '}' | '[' | ']' | '(' | ')' | '#' | '+' | '-' | '.'
+            | '!' | '|' | '~' => {
+                escaped.push('\\');
+                escaped.push(character);
+            }
+            _ => escaped.push(character),
+        }
+    }
+    escaped
+}
+
 fn output_parent(path: &Path) -> &Path {
     path.parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -321,30 +427,6 @@ fn acquire_output_lock(path: &Path) -> Result<OutputLock> {
 }
 
 #[cfg(unix)]
-fn secure_file(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("无法设置文字稿权限 {}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn secure_file(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
-#[cfg(unix)]
-fn secure_directory(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-        .with_context(|| format!("无法设置输出锁目录权限 {}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn secure_directory(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
-#[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<()> {
     fs::File::open(path)
         .and_then(|directory| directory.sync_all())
@@ -380,9 +462,14 @@ mod tests {
 
     #[test]
     fn ocr_output_uses_distinct_suffix() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("scan.page.png");
+        fs::write(&source, b"fixture").unwrap();
         assert_eq!(
-            ocr_output_path(Path::new("scan.page.png")).unwrap(),
-            PathBuf::from("scan.page.ocr.md")
+            ocr_output_path(&source).unwrap(),
+            fs::canonicalize(directory.path())
+                .unwrap()
+                .join("scan.page.ocr.md")
         );
     }
 
@@ -393,5 +480,14 @@ mod tests {
             output_parent(Path::new("notes/meeting.md")),
             Path::new("notes")
         );
+    }
+
+    #[test]
+    fn markdown_escape_blocks_html_and_remote_links() {
+        let escaped = escape_markdown_text("<img src=\"https://evil\"> [打开](https://evil)");
+        assert!(!escaped.contains("<img"));
+        assert!(!escaped.contains("[打开]("));
+        assert!(escaped.contains("&lt;img"));
+        assert!(escaped.contains("\\[打开\\]\\("));
     }
 }
