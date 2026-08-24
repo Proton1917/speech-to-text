@@ -25,6 +25,7 @@ provider = google-vertex/global
   → FFmpeg 一次性解码成单声道 32 kHz 无损 FLAC 母版
   → 规划连续、无重叠的 15 分钟 TARGET
   → 阶段 A 只把 exact TARGET 交给模型，生成正文、时间和片内 L1/L2
+  → Rust 使用内置 OpenCC t2s 将中文正文确定性归一化为 zh-Hans
   → FFmpeg 能量覆盖提示发现明显空洞；异常时重听一次并记录 advisory
   → 阶段 B 把历史 S 参考、边界上下文和本片 L 候选合成短 MP3
   → 同一个模型只返回 L→S/NEW/UNKNOWN；Rust 持有并更新全局 S1/S2/S3
@@ -32,7 +33,7 @@ provider = google-vertex/global
   → 在源文件同目录以 `0600` 权限原子写入 Markdown
 ```
 
-程序不会下载本地 diarization 模型，也不会把数小时音频整体读入内存。SpeakerHarness 只在任务内保存无损母版上的短参考范围，每次临时合成后上传给当前 OpenRouter provider，请求结束立即删除。临时目录为 `0700`、媒体为 `0600`，临时空间、HTTP 尝试次数和自适应深度都有硬上限。Ctrl-C 会协作式取消网络与 FFmpeg 并清理临时内容。阶段 A 正文无法可靠完成时整项失败；阶段 B 身份对齐失败时不会丢正文，而是显式降为 `UNKNOWN`。
+程序不会下载本地 diarization 模型，也不会把数小时音频整体读入内存。简繁转换使用嵌入二进制的 OpenCC 文字词典，不是语音模型、不需要外部数据文件，也不增加 OpenRouter 调用。SpeakerHarness 只在任务内保存无损母版上的短参考范围，每次临时合成后上传给当前 OpenRouter provider，请求结束立即删除。临时目录为 `0700`、媒体为 `0600`，临时空间、HTTP 尝试次数和自适应深度都有硬上限。Ctrl-C 会协作式取消网络与 FFmpeg 并清理临时内容。阶段 A 正文无法可靠完成时整项失败；阶段 B 身份对齐失败时不会丢正文，而是显式降为 `UNKNOWN`。
 
 ## 安装
 
@@ -208,6 +209,12 @@ spt ocr "扫描件.png"
 
 当前支持单张静态 `.png`、`.jpg`、`.jpeg`、`.webp`。动画 PNG/WebP 会被拒绝；最长边不超过 32768 像素、总像素不超过 1 亿、文件不超过 64 MiB。发送前先在不放大小图的前提下缩至最长边 4096 像素以内，再把透明背景合成白色并编码为 JPEG。首版不处理 PDF 或多页文档。
 
+## 简体中文保证
+
+模型提示仍要求输出简体中文，但模型指令不是硬约束。每个 Stage A turn 通过 JSON/时间校验后，Rust 会在进入 SpeakerHarness 状态、`previous_tail` 和 Markdown 之前执行内置 OpenCC `t2s` 转换。因此模型偶发返回的繁体或简繁混合文本会被确定性写成 `zh-Hans`，不需要第二次模型改写，也不会增加费用。
+
+含有日文假名的 turn 会保持原文，避免把日语汉字误当成中文转换。OCR 继续忠实保留图片原文，不执行简繁转换。
+
 ## SpeakerHarness 与全局说话人
 
 每个录音只维护一份任务内 SpeakerHarness：
@@ -257,6 +264,7 @@ TARGET 按连续、无重叠的无损时间轴覆盖全部采样。阶段 A 的�
 - 每段的确定性音频边界。
 - 全局 speaker IDs、30 秒 overlap、对齐状态，以及 `best_effort` 身份保证边界。
 - FFmpeg 能量覆盖状态；`advisory_warning` 只表示能量与 `no_speech` 冲突，不能当作语音判定。
+- `chinese_script: zh-Hans` 与 `chinese_normalization: opencc-t2s`，记录确定性简体归一化。
 
 时间标题表示本地无损母版的切分边界，不是模型猜测的逐句时间戳。字段使用 `reported_*` 前缀；`usage_reported_for_all_accepted_responses` 会说明已接受响应的统计是否完整。`reported_accepted_cost_usd` 统计最终正文响应和成功身份映射响应；语义重试、失败映射或自适应二分前被丢弃的响应可能已经产生额外费用。
 

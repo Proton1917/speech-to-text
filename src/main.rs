@@ -16,7 +16,7 @@ use spt::openrouter::OpenRouterClient;
     long_about = "spt 使用 OpenRouter 音频多模态模型转写本地录音，并由 Rust SpeakerHarness 维护跨片段说话人编号。\n\n直接给出合法音频路径后，会在源文件同一目录生成同名 Markdown 文字稿。默认每 15 分钟切分；正文过长时从无损母版继续二分。模型和 provider 会持久保存，直到再次修改。",
     arg_required_else_help = false,
     disable_help_subcommand = true,
-    after_help = "常用指令：\n  spt <AUDIO_PATH>                         转写音频，在原位置生成同名 .md\n  spt --force <AUDIO_PATH>                 完整成功后原子替换已有文字稿\n  spt --model <MODEL_ID>                   持久设置 OpenRouter 模型\n  spt --provider <ENDPOINT_TAG|any>        持久设置精确 provider 或自动路由\n  spt models [SEARCH]                      列出支持音频的模型\n  spt providers [MODEL_ID]                 列出模型可用的 provider endpoints\n  spt config                               查看生效配置，不显示 API Key\n  spt ocr <IMAGE_PATH>                     OCR 单张图片，生成 *.ocr.md\n  spt help [COMMAND]                       显示完整介绍或指定子命令帮助\n\n示例：\n  spt \"会议录音.m4a\"\n  spt --model google/gemini-3.5-flash-lite\n  spt --provider google-vertex/global\n  spt help ocr\n\n说明：\n  - OPENROUTER_API_KEY 只从环境变量读取，不会写入配置。\n  - 默认不覆盖已有输出；只有 --force 会在完整结果就绪后原子替换。\n  - provider=any 是显式隐私降级；固定 provider 会要求 ZDR 并关闭 fallback。"
+    after_help = "常用指令：\n  spt <AUDIO_PATH>                         转写音频，在原位置生成同名 .md\n  spt --force <AUDIO_PATH>                 完整成功后原子替换已有文字稿\n  spt --model <MODEL_ID>                   持久设置 OpenRouter 模型\n  spt --provider <ENDPOINT_TAG|any>        持久设置精确 provider 或自动路由\n  spt models [SEARCH]                      列出支持音频的模型\n  spt providers [MODEL_ID]                 列出模型可用的 provider endpoints\n  spt config                               查看生效配置，不显示 API Key\n  spt ocr <IMAGE_PATH>                     OCR 单张图片，生成 *.ocr.md\n  spt help [COMMAND]                       显示完整介绍或指定子命令帮助\n\n示例：\n  spt \"会议录音.m4a\"\n  spt --model google/gemini-3.5-flash-lite\n  spt --provider google-vertex/global\n  spt help ocr\n\n说明：\n  - OPENROUTER_API_KEY 只从环境变量读取，不会写入配置。\n  - 中文转写会在写盘前由内置 OpenCC 确定性归一化为 zh-Hans。\n  - 默认不覆盖已有输出；只有 --force 会在完整结果就绪后原子替换。\n  - provider=any 是显式隐私降级；固定 provider 会要求 ZDR 并关闭 fallback。"
 )]
 struct Cli {
     /// 要转写的本地音频文件
@@ -232,7 +232,7 @@ fn print_command_help(command: Option<&str>) -> Result<()> {
 fn command_topic_guide(name: &str) -> Option<&'static str> {
     match name {
         "audio" | "transcribe" | "转写" => Some(
-            "音频转写\n\n用法：\n  spt <AUDIO_PATH>\n  spt --force <AUDIO_PATH>\n\n输出：\n  在音频旁生成 <AUDIO_STEM>.md。默认不覆盖已有文件。\n\n支持格式：\n  aac, aif, aiff, caf, flac, m4a, m4b, mp3, oga, ogg, opus, wav, webm, wma\n\n示例：\n  spt \"/path/to/会议录音.m4a\"",
+            "音频转写\n\n用法：\n  spt <AUDIO_PATH>\n  spt --force <AUDIO_PATH>\n\n输出：\n  在音频旁生成 <AUDIO_STEM>.md。默认不覆盖已有文件。\n  中文正文在写盘前由内置 OpenCC t2s 归一化为 zh-Hans。\n\n支持格式：\n  aac, aif, aiff, caf, flac, m4a, m4b, mp3, oga, ogg, opus, wav, webm, wma\n\n示例：\n  spt \"/path/to/会议录音.m4a\"",
         ),
         "ocr" => Some(
             "图片 OCR\n\n用法：\n  spt ocr <IMAGE_PATH>\n  spt ocr --force <IMAGE_PATH>\n\n输出：\n  在图片旁生成 <IMAGE_STEM>.ocr.md。\n\n支持格式：\n  png, jpg, jpeg, webp\n\n示例：\n  spt ocr \"/path/to/扫描件.png\"",
@@ -332,6 +332,7 @@ mod tests {
         assert!(help.contains("spt --model <MODEL_ID>"));
         assert!(help.contains("spt help [COMMAND]"));
         assert!(help.contains("OPENROUTER_API_KEY"));
+        assert!(help.contains("zh-Hans"));
     }
 
     #[test]

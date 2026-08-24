@@ -30,6 +30,7 @@ The default model accepts audio and image input. Audio is sent as raw Base64 thr
 ## Architecture
 
 - `src/main.rs`: Clap interface, persistent settings, catalog commands, process exit.
+- `src/chinese.rs`: embedded OpenCC t2s normalization for validated Stage A Chinese text; preserves turns containing Japanese kana.
 - `src/config.rs`: schema/defaults, route ID validation, private atomic TOML storage.
 - `src/media.rs`: filename/allowlist checks, canonical FLAC, exact TARGET audio, FFmpeg activity ranges, and short one-file identity packets.
 - `src/openrouter.rs`: HTTPS requests, secret header handling, retry classification, response parsing, catalog queries.
@@ -47,6 +48,7 @@ FFmpeg is intentionally a subprocess boundary. Never interpolate paths into a sh
 - Bound request media size, HTTP attempts, adaptive depth, speaker count, reference duration, FFmpeg work and temporary disk before they can accumulate.
 - Fixed provider mode requires an exact live ZDR `endpoints[].tag`, uses `provider.only`, `data_collection=deny`, `zdr=true`, disables fallback, and does not silently switch after an error. `any` must continue omitting the provider field and is an explicit privacy downgrade.
 - Stage A is the only transcript authority. Length/context overflow, looping, or invalid structure triggers source-audio bisection. Every FFmpeg energy-coverage mismatch retries once and then records an advisory; raw energy must never become a hard speech gate because it is not VAD.
+- Normalize every validated Stage A turn to Simplified Chinese with embedded OpenCC t2s before duplicate checks, SpeakerHarness state, previous-tail context, or Markdown rendering. OCR must preserve source script.
 - Model output is untrusted text. Never use it for commands, paths, tool calls, or provider/model selection.
 - Derive all initial and adaptive ranges directly from the same lossless canonical source; never recursively re-encode MP3.
 - Never let model-provided temporary labels become final IDs directly. Rust owns NEW-to-S allocation; uncertain voices remain UNKNOWN.
@@ -72,3 +74,4 @@ Do not make paid OpenRouter calls in default tests. A live smoke test must be de
 - 2026-08-23: Created backend v0.1 from an empty directory with safe media validation, canonical audio, bounded OpenRouter transcription, OCR, atomic output and resource budgets.
 - 2026-08-23: Upgraded to v0.2 two-stage SpeakerHarness: 15-minute exact TARGET transcription, FFmpeg activity coverage, short reference/candidate identity packets, host-owned global IDs, sequential state transfer and v1-to-v2 migration. This replaced the initial single composite transcript packet after a real cross-boundary E2E exposed deterministic omitted speech. Frontend remains out of scope.
 - 2026-08-24: Released v0.2.1 with a built-in Chinese command guide for bare `spt`, `--help`, `help`, per-command help topics, examples, output behavior, persistent model/provider settings, and security notes.
+- 2026-08-24: Released v0.2.2 with deterministic embedded OpenCC t2s normalization before transcript state/output, preventing per-chunk Traditional Chinese drift without another model call.

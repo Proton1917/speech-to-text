@@ -208,6 +208,8 @@ pub fn render_transcript(
         "source_container: {}\n",
         yaml_string(&info.container)?
     ));
+    markdown.push_str("chinese_script: \"zh-Hans\"\n");
+    markdown.push_str("chinese_normalization: \"opencc-t2s\"\n");
     markdown.push_str(&format!("segments: {}\n", parts.len()));
     markdown.push_str(&format!(
         "accepted_model_responses: {}\n",
@@ -489,5 +491,41 @@ mod tests {
         assert!(!escaped.contains("[打开]("));
         assert!(escaped.contains("&lt;img"));
         assert!(escaped.contains("\\[打开\\]\\("));
+    }
+
+    #[test]
+    fn transcript_metadata_records_deterministic_zh_hans_normalization() {
+        let part = TranscriptPart {
+            start_ms: 0,
+            end_ms: 1_000,
+            completion: Completion {
+                text: "S1：我们".into(),
+                model: "test/model".into(),
+                provider: "test/provider".into(),
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                reasoning_tokens: 0,
+                cost: 0.0,
+                usage_reported: true,
+                reasoning_tokens_reported: true,
+            },
+            auxiliary_completions: Vec::new(),
+            speaker_ids: vec!["S1".into()],
+            turn_count: 1,
+            acoustic_coverage_warning: false,
+        };
+        let markdown = render_transcript(
+            Path::new("meeting.wav"),
+            &Config::default(),
+            &AudioInfo {
+                duration_ms: 1_000,
+                codec: "pcm_s16le".into(),
+                container: "wav".into(),
+            },
+            &[part],
+        )
+        .unwrap();
+        assert!(markdown.contains("chinese_script: \"zh-Hans\""));
+        assert!(markdown.contains("chinese_normalization: \"opencc-t2s\""));
     }
 }

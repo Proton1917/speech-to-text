@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
+use crate::chinese::normalize_to_simplified;
 use crate::config::Config;
 use crate::media::{MediaChunk, NonSilentRange, SpeakerPacket, SpeakerReferenceRange};
 use crate::output::escape_markdown_text;
@@ -586,9 +587,14 @@ pub fn parse_local_transcript(
 
     let mut turns = Vec::with_capacity(parsed.turns.len());
     for raw in parsed.turns {
-        let text = raw.text.trim();
-        if text.is_empty() {
+        let raw_text = raw.text.trim();
+        if raw_text.is_empty() {
             bail!("exact TARGET 返回空白 turn");
+        }
+        let text = normalize_to_simplified(raw_text)
+            .context("无法将 exact TARGET 正文归一化为简体中文")?;
+        if text.trim().is_empty() {
+            bail!("简体中文归一化后得到空白 turn");
         }
         validate_local_speaker_label(&raw.local_speaker_id, max_speakers)?;
         if raw.start_ms >= raw.end_ms || raw.end_ms > chunk.duration_ms() {
@@ -598,7 +604,7 @@ pub fn parse_local_transcript(
             local_speaker_id: raw.local_speaker_id,
             start_ms: raw.start_ms,
             end_ms: raw.end_ms,
-            text: text.to_owned(),
+            text,
             clean_reference: raw.clean_reference,
         });
     }
@@ -791,6 +797,19 @@ mod tests {
         assert_eq!(
             schema.pointer("/json_schema/schema/properties/turns/items/properties/end_ms/maximum"),
             Some(&json!(10_000))
+        );
+    }
+
+    #[test]
+    fn exact_target_parser_normalizes_traditional_chinese_before_state() {
+        let chunk = chunk(0, 10_000);
+        let transcript = parse(
+            r#"{"audio_status":"speech","target_complete":true,"processed_through_ms":10000,"turns":[{"local_speaker_id":"L1","start_ms":0,"end_ms":5000,"text":"我們團隊希望對於這個項目進行創新。","clean_reference":true}]}"#,
+            &chunk,
+        );
+        assert_eq!(
+            transcript.turns[0].text,
+            "我们团队希望对于这个项目进行创新。"
         );
     }
 

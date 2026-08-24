@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use async_recursion::async_recursion;
 
+use crate::chinese::ensure_simplified_converter;
 use crate::config::Config;
 use crate::media::{
     MediaChunk, NonSilentRange, build_exact_target_audio, build_speaker_packet, canonicalize_audio,
@@ -76,6 +77,7 @@ pub async fn transcribe(input: &Path, config: &Config, force: bool) -> Result<Pa
     let output = markdown_output_path(input)?;
     let output_transaction = AtomicOutput::begin(&output, force)?;
     let client = OpenRouterClient::from_environment(config.clone(), true)?;
+    ensure_simplified_converter().context("无法准备简体中文归一化")?;
     client.validate_selection("audio").await?;
     let workspace = private_workspace("spt-audio-")?;
 

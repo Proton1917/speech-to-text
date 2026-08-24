@@ -1,3 +1,4 @@
+pub mod chinese;
 pub mod config;
 pub mod media;
 pub mod openrouter;
