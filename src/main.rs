@@ -14,19 +14,23 @@ use spt::transcript::TranscriptMode;
     name = "spt",
     version,
     about = "安全、可持久配置的 OpenRouter 语音转文字 CLI",
-    long_about = "spt 使用 OpenRouter 音频多模态模型转写本地录音，并由 Rust SpeakerHarness 维护跨片段说话人编号。\n\n直接给出合法音频路径后，会在源文件同一目录生成同名 Markdown 文字稿。默认每 15 分钟切分；正文过长时从无损母版继续二分。模型和 provider 会持久保存，直到再次修改。",
+    long_about = "spt 使用 OpenRouter 音频多模态模型转写本地录音，并由 Rust SpeakerHarness 维护跨片段说话人编号。\n\n直接给出合法音频路径后，会在源文件同一目录生成同名 Markdown 文字稿。quality 根片段最长 5 分钟，raw 最长 15 分钟；正文过长时从无损母版继续二分。模型和 provider 会持久保存，直到再次修改。",
     arg_required_else_help = false,
     disable_help_subcommand = true,
-    after_help = "常用指令：\n  spt <AUDIO_PATH>                         默认高质量稿，输出同名 .md\n  spt --raw <AUDIO_PATH>                   原始逐字稿，输出同名 .raw.md\n  spt --force <AUDIO_PATH>                 完整成功后原子替换已有目标稿件\n  spt --model <MODEL_ID>                   持久设置 OpenRouter 模型\n  spt --provider <ENDPOINT_TAG|any>        持久设置精确 provider 或自动路由\n  spt models [SEARCH]                      列出支持音频的模型\n  spt providers [MODEL_ID]                 列出模型可用的 provider endpoints\n  spt config                               查看生效配置，不显示 API Key\n  spt ocr <IMAGE_PATH>                     OCR 单张图片，生成 *.ocr.md\n  spt help [COMMAND]                       显示完整介绍或指定子命令帮助\n\n示例：\n  spt \"会议录音.m4a\"\n  spt --raw \"会议录音.m4a\"\n  spt --model google/gemini-3.5-flash-lite\n  spt --provider google-vertex/global\n\n说明：\n  - 默认 quality 只清理无意义口头禅、结巴和机械重复，不总结或更改事实。\n  - --raw 保留语气词、卡顿、重复、自我修正和不完整句。\n  - OPENROUTER_API_KEY 只从环境变量读取，不会写入配置。\n  - 中文转写会在写盘前由内置 OpenCC 确定性归一化为 zh-Hans。\n  - 默认不覆盖已有输出；只有 --force 会在完整结果就绪后原子替换。\n  - provider=any 是显式隐私降级；固定 provider 会要求 ZDR 并关闭 fallback。"
+    after_help = "常用指令：\n  spt <AUDIO_PATH>                         默认高质量稿，输出同名 .md\n  spt --raw <AUDIO_PATH>                   原始逐字稿，输出同名 .raw.md\n  spt --force <AUDIO_PATH>                 完整成功后原子替换已有目标稿件\n  spt --model <MODEL_ID>                   持久设置并统一覆盖两个模型\n  spt --quality-model <MODEL_ID>           单独设置质量复核模型\n  spt --provider <ENDPOINT_TAG|any>        持久设置精确 provider 或自动路由\n  spt models [SEARCH]                      列出支持音频的模型\n  spt providers [MODEL_ID]                 列出模型可用的 provider endpoints\n  spt config                               查看生效配置，不显示 API Key\n  spt ocr <IMAGE_PATH>                     OCR 单张图片，生成 *.ocr.md\n  spt help [COMMAND]                       显示完整介绍或指定子命令帮助\n\n示例：\n  spt \"会议录音.m4a\"\n  spt --raw \"会议录音.m4a\"\n  spt --model google/gemini-3.5-flash-lite\n  spt --quality-model google/gemini-3.7-flash\n  spt --provider google-vertex/global\n\n说明：\n  - 默认 quality 的首个 TARGET 用 Gemini 3.7 Flash 建立可靠起点；后续由基础模型转写，只有可疑片段再升级 3.7。\n  - --raw 始终使用基础模型，保留语气词、卡顿、重复、自我修正和不完整句。\n  - 显式 --model 会统一覆盖基础与质量复核模型；--quality-model 可再单独调整复核模型。\n  - OPENROUTER_API_KEY 只从环境变量读取，不会写入配置。\n  - 中文转写会在写盘前由内置 OpenCC 确定性归一化为 zh-Hans。\n  - 默认不覆盖已有输出；只有 --force 会在完整结果就绪后原子替换。\n  - provider=any 是显式隐私降级；固定 provider 会要求 ZDR 并关闭 fallback。"
 )]
 struct Cli {
     /// 要转写的本地音频文件
     #[arg(value_name = "AUDIO_PATH")]
     audio_path: Option<PathBuf>,
 
-    /// 保存并使用 OpenRouter 模型代号，例如 google/gemini-3.5-flash-lite
+    /// 保存模型并同时覆盖基础与质量复核路由
     #[arg(long, global = true, value_name = "MODEL_ID")]
     model: Option<String>,
+
+    /// 单独保存质量复核模型；--model 会同时覆盖基础与复核模型
+    #[arg(long, global = true, value_name = "MODEL_ID")]
+    quality_model: Option<String>,
 
     /// 保存完整 provider endpoint tag；传入 any 表示允许 OpenRouter 任意路由
     #[arg(long, global = true, value_name = "PROVIDER_ID|any")]
@@ -61,8 +65,8 @@ enum Commands {
     /// 列出指定模型可用的 OpenRouter provider endpoints
     Providers {
         /// 默认使用当前已保存的模型
-        #[arg(value_name = "MODEL_ID")]
-        model: Option<String>,
+        #[arg(id = "provider_target_model", value_name = "MODEL_ID")]
+        target_model: Option<String>,
     },
     /// 显示生效配置和配置文件位置，不显示 API Key
     Config,
@@ -103,6 +107,7 @@ async fn run() -> Result<()> {
     if cli.audio_path.is_none()
         && cli.command.is_none()
         && cli.model.is_none()
+        && cli.quality_model.is_none()
         && cli.provider.is_none()
         && !cli.force
         && !cli.raw
@@ -113,6 +118,7 @@ async fn run() -> Result<()> {
     if let Some(Commands::Help { command }) = cli.command.as_ref() {
         if cli.audio_path.is_some()
             || cli.model.is_some()
+            || cli.quality_model.is_some()
             || cli.provider.is_some()
             || cli.force
             || cli.raw
@@ -124,22 +130,37 @@ async fn run() -> Result<()> {
     }
     validate_raw_scope(&cli)?;
     let (mut config, config_path, config_existed, config_migrated) = Config::load()?;
-    let changed =
-        apply_config_overrides(&mut config, cli.model.as_deref(), cli.provider.as_deref())?;
+    let loaded_config = config.clone();
+    let changed = apply_config_overrides(
+        &mut config,
+        cli.model.as_deref(),
+        cli.quality_model.as_deref(),
+        cli.provider.as_deref(),
+    )?;
     config.validate()?;
     if changed {
-        OpenRouterClient::from_environment(config.clone(), false)?
-            .validate_selection("audio")
-            .await?;
+        let client = OpenRouterClient::from_environment(config.clone(), false)?;
+        client.validate_selection("audio").await?;
+        if config.effective_quality_review_model() != config.model {
+            client
+                .routed_to_model(config.effective_quality_review_model())?
+                .validate_selection("audio")
+                .await?;
+        }
     }
     if changed || !config_existed || config_migrated {
         let config_lock = ConfigLock::acquire(&config_path)?;
         let (mut latest, latest_path, latest_existed, latest_migrated) = Config::load()?;
-        apply_config_overrides(&mut latest, cli.model.as_deref(), cli.provider.as_deref())?;
-        latest.validate()?;
-        if changed && (latest.model != config.model || latest.provider != config.provider) {
+        if changed && latest != loaded_config {
             bail!("配置在网络校验期间被其他进程修改，请重新执行本次设置命令");
         }
+        apply_config_overrides(
+            &mut latest,
+            cli.model.as_deref(),
+            cli.quality_model.as_deref(),
+            cli.provider.as_deref(),
+        )?;
+        latest.validate()?;
         if changed || !latest_existed || latest_migrated {
             latest.save(&latest_path)?;
         }
@@ -149,7 +170,7 @@ async fn run() -> Result<()> {
             eprintln!("配置已保存：{}", config_path.display());
         } else if config_migrated {
             eprintln!(
-                "配置已迁移到 SpeakerHarness schema v2：{}",
+                "配置已迁移到双模型质量路由 schema v3：{}",
                 config_path.display()
             );
         }
@@ -179,9 +200,9 @@ async fn run() -> Result<()> {
                     }
                 }
             }
-            Commands::Providers { model } => {
+            Commands::Providers { target_model } => {
                 reject_force(cli.force)?;
-                let model = model.unwrap_or_else(|| config.model.clone());
+                let model = target_model.unwrap_or_else(|| config.model.clone());
                 validate_model_id(&model)?;
                 let client = OpenRouterClient::from_environment(config, false)?;
                 let providers = client.list_providers(&model).await?;
@@ -221,6 +242,7 @@ async fn run() -> Result<()> {
 
     if changed {
         println!("model={}", config.model);
+        println!("quality_review_model={}", config.quality_review_model);
         println!("provider={}", config.provider);
         return Ok(());
     }
@@ -259,7 +281,7 @@ fn print_command_help(command: Option<&str>) -> Result<()> {
 fn command_topic_guide(name: &str) -> Option<&'static str> {
     match name {
         "audio" | "transcribe" | "转写" => Some(
-            "音频转写\n\n用法：\n  spt <AUDIO_PATH>\n  spt --raw <AUDIO_PATH>\n  spt --force <AUDIO_PATH>\n\n输出：\n  默认生成 <AUDIO_STEM>.md 高质量稿，清理无意义口头禅、结巴和机械重复，但不总结或更改事实。\n  --raw 生成 <AUDIO_STEM>.raw.md 原始逐字稿，保留语气词、卡顿、重复、自我修正和不完整句。\n  两种输出可以同时存在，默认均不覆盖已有文件。\n  中文正文在写盘前由内置 OpenCC t2s 归一化为 zh-Hans。\n\n支持格式：\n  aac, aif, aiff, caf, flac, m4a, m4b, mp3, oga, ogg, opus, wav, webm, wma\n\n示例：\n  spt \"/path/to/会议录音.m4a\"\n  spt --raw \"/path/to/会议录音.m4a\"",
+            "音频转写\n\n用法：\n  spt <AUDIO_PATH>\n  spt --raw <AUDIO_PATH>\n  spt --force <AUDIO_PATH>\n\n输出：\n  默认生成 <AUDIO_STEM>.md 高质量稿：首个 TARGET 使用 Gemini 3.7 Flash，后续基础模型片段只有被 Rust 门禁判为可疑时才升级 3.7。\n  --raw 生成 <AUDIO_STEM>.raw.md 原始逐字稿，只使用基础模型并保留语气词、卡顿、重复、自我修正和不完整句。\n  两种输出可以同时存在，默认均不覆盖已有文件。\n  中文正文在写盘前由内置 OpenCC t2s 归一化为 zh-Hans。\n\n支持格式：\n  aac, aif, aiff, caf, flac, m4a, m4b, mp3, oga, ogg, opus, wav, webm, wma\n\n示例：\n  spt \"/path/to/会议录音.m4a\"\n  spt --raw \"/path/to/会议录音.m4a\"",
         ),
         "ocr" => Some(
             "图片 OCR\n\n用法：\n  spt ocr <IMAGE_PATH>\n  spt ocr --force <IMAGE_PATH>\n\n输出：\n  在图片旁生成 <IMAGE_STEM>.ocr.md。\n\n支持格式：\n  png, jpg, jpeg, webp\n\n示例：\n  spt ocr \"/path/to/扫描件.png\"",
@@ -271,7 +293,7 @@ fn command_topic_guide(name: &str) -> Option<&'static str> {
             "Provider 目录\n\n用法：\n  spt providers [MODEL_ID]\n\n作用：\n  列出指定模型的完整 endpoint tag；省略 MODEL_ID 时使用当前已保存模型。\n\n示例：\n  spt providers\n  spt providers google/gemini-3.5-flash-lite\n  spt --provider google-vertex/global\n  spt --provider any",
         ),
         "config" => Some(
-            "查看配置\n\n用法：\n  spt config\n\n作用：\n  显示配置文件位置、模型、provider、切分和安全预算等生效值。\n  只显示 OPENROUTER_API_KEY 是否已设置，绝不显示 Key 内容。\n\n持久修改：\n  spt --model <MODEL_ID>\n  spt --provider <ENDPOINT_TAG|any>",
+            "查看配置\n\n用法：\n  spt config\n\n作用：\n  显示配置文件位置、基础模型、质量复核模型、provider、切分和安全预算等生效值。\n  只显示 OPENROUTER_API_KEY 是否已设置，绝不显示 Key 内容。\n\n持久修改：\n  spt --model <MODEL_ID>\n  spt --quality-model <MODEL_ID>\n  spt --provider <ENDPOINT_TAG|any>",
         ),
         "help" => Some(
             "指令帮助\n\n用法：\n  spt\n  spt --help\n  spt help [COMMAND]\n\n可选主题：\n  audio, ocr, models, providers, config, help\n\n帮助命令离线执行，不读取或修改 spt 配置。",
@@ -283,12 +305,19 @@ fn command_topic_guide(name: &str) -> Option<&'static str> {
 fn apply_config_overrides(
     config: &mut Config,
     model: Option<&str>,
+    quality_model: Option<&str>,
     provider: Option<&str>,
 ) -> Result<bool> {
     let mut changed = false;
     if let Some(model) = model {
         validate_model_id(model)?;
         config.model = model.to_owned();
+        config.quality_review_model = model.to_owned();
+        changed = true;
+    }
+    if let Some(quality_model) = quality_model {
+        validate_model_id(quality_model)?;
+        config.quality_review_model = quality_model.to_owned();
         changed = true;
     }
     if let Some(provider) = provider {
@@ -320,8 +349,21 @@ fn print_config(config: &Config, path: &std::path::Path) {
     println!("config={}", path.display());
     println!("schema_version={}", config.schema_version);
     println!("model={}", config.model);
+    println!("quality_review_model={}", config.quality_review_model);
+    println!(
+        "effective_quality_review_model={}",
+        config.effective_quality_review_model()
+    );
     println!("provider={}", config.provider);
     println!("chunk_seconds={}", config.chunk_seconds);
+    println!(
+        "effective_quality_chunk_seconds={}",
+        config.effective_quality_chunk_seconds()
+    );
+    println!(
+        "effective_quality_min_chunk_seconds={}",
+        config.effective_quality_min_chunk_seconds()
+    );
     println!("overlap_seconds={}", config.overlap_seconds);
     println!("min_chunk_seconds={}", config.min_chunk_seconds);
     println!("max_output_tokens={}", config.max_output_tokens);
@@ -357,6 +399,7 @@ mod tests {
         assert!(help.contains("常用指令"));
         assert!(help.contains("spt <AUDIO_PATH>"));
         assert!(help.contains("spt --model <MODEL_ID>"));
+        assert!(help.contains("spt --quality-model <MODEL_ID>"));
         assert!(help.contains("spt --raw <AUDIO_PATH>"));
         assert!(help.contains("spt help [COMMAND]"));
         assert!(help.contains("OPENROUTER_API_KEY"));
@@ -380,6 +423,7 @@ mod tests {
         assert!(cli.audio_path.is_none());
         assert!(cli.command.is_none());
         assert!(cli.model.is_none());
+        assert!(cli.quality_model.is_none());
         assert!(cli.provider.is_none());
         assert!(!cli.force);
         assert!(!cli.raw);
@@ -401,6 +445,37 @@ mod tests {
 
         let subcommand = Cli::try_parse_from(["spt", "--raw", "config"]).unwrap();
         assert!(validate_raw_scope(&subcommand).is_err());
+    }
+
+    #[test]
+    fn providers_positional_model_does_not_mutate_the_global_model_option() {
+        let cli = Cli::try_parse_from(["spt", "providers", "google/gemini-3.7-flash"]).unwrap();
+        assert!(cli.model.is_none());
+        assert!(cli.quality_model.is_none());
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Providers {
+                target_model: Some(ref model)
+            }) if model == "google/gemini-3.7-flash"
+        ));
+    }
+
+    #[test]
+    fn model_override_controls_both_routes_and_quality_override_can_split_them() {
+        let mut config = Config::default();
+        apply_config_overrides(
+            &mut config,
+            Some("google/gemini-3.5-flash-lite"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(config.model, "google/gemini-3.5-flash-lite");
+        assert_eq!(config.quality_review_model, "google/gemini-3.5-flash-lite");
+
+        apply_config_overrides(&mut config, None, Some("google/gemini-3.7-flash"), None).unwrap();
+        assert_eq!(config.model, "google/gemini-3.5-flash-lite");
+        assert_eq!(config.quality_review_model, "google/gemini-3.7-flash");
     }
 
     #[test]

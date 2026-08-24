@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, hash_map::DefaultHasher};
+use std::collections::{BTreeMap, BTreeSet, hash_map::DefaultHasher};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
@@ -23,6 +23,11 @@ pub struct TranscriptPart {
     pub speaker_ids: Vec<String>,
     pub turn_count: usize,
     pub acoustic_coverage_warning: bool,
+    pub quality_reviewed: bool,
+    pub quality_review_advisory: bool,
+    pub quality_cleanup_turns: usize,
+    pub quality_trigger_codes: Vec<String>,
+    pub quality_residual_advisory_codes: Vec<String>,
 }
 
 pub struct AtomicOutput {
@@ -144,6 +149,14 @@ pub fn render_transcript(
         .iter()
         .map(|completion| completion.cost)
         .sum::<f64>();
+    let mut responses_by_model = BTreeMap::<String, u64>::new();
+    let mut cost_by_model = BTreeMap::<String, f64>::new();
+    for completion in &completions {
+        *responses_by_model
+            .entry(completion.model.clone())
+            .or_default() += 1;
+        *cost_by_model.entry(completion.model.clone()).or_default() += completion.cost;
+    }
     let all_speaker_ids = parts
         .iter()
         .flat_map(|part| part.speaker_ids.iter().cloned())
@@ -164,9 +177,41 @@ pub fn render_transcript(
     let speaker_alignment_status = if unresolved_speaker_present {
         "unresolved_labels_present"
     } else {
-        "structurally_resolved"
+        "all_labels_assigned"
     };
     let acoustic_coverage_warning_present = parts.iter().any(|part| part.acoustic_coverage_warning);
+    let quality_review_segments = parts.iter().filter(|part| part.quality_reviewed).count();
+    let quality_review_advisory_present = parts.iter().any(|part| part.quality_review_advisory);
+    let quality_cleanup_turns = parts
+        .iter()
+        .map(|part| part.quality_cleanup_turns)
+        .sum::<usize>();
+    let quality_trigger_codes = parts
+        .iter()
+        .flat_map(|part| part.quality_trigger_codes.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let quality_residual_advisory_codes = parts
+        .iter()
+        .flat_map(|part| part.quality_residual_advisory_codes.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let quality_bootstrap_segments = parts
+        .iter()
+        .filter(|part| {
+            part.quality_trigger_codes
+                .iter()
+                .any(|code| code == "quality_bootstrap")
+        })
+        .count();
+    let quality_review_status = match mode {
+        TranscriptMode::Raw => "not_applicable",
+        TranscriptMode::Quality if quality_review_advisory_present => "completed_with_advisory",
+        TranscriptMode::Quality if quality_review_segments > 0 => "completed",
+        TranscriptMode::Quality => "not_needed",
+    };
     let usage_reported_for_all_requests = completions
         .iter()
         .all(|completion| completion.usage_reported);
@@ -181,6 +226,17 @@ pub fn render_transcript(
         "model_requested: {}\n",
         yaml_string(&config.model)?
     ));
+    markdown.push_str(&format!(
+        "base_model_requested: {}\n",
+        yaml_string(&config.model)?
+    ));
+    match mode {
+        TranscriptMode::Quality => markdown.push_str(&format!(
+            "quality_review_model_requested: {}\n",
+            yaml_string(config.effective_quality_review_model())?
+        )),
+        TranscriptMode::Raw => markdown.push_str("quality_review_model_requested: null\n"),
+    }
     markdown.push_str(&format!(
         "provider_requested: {}\n",
         yaml_string(&config.provider)?
@@ -217,9 +273,63 @@ pub fn render_transcript(
     ));
     markdown.push_str("chinese_script: \"zh-Hans\"\n");
     markdown.push_str("chinese_normalization: \"opencc-t2s\"\n");
+    markdown.push_str(&format!(
+        "transcription_strategy: \"{}\"\n",
+        match mode {
+            TranscriptMode::Quality => "adaptive-rust-gated-quality-review-v1",
+            TranscriptMode::Raw => "single-model-verbatim-v1",
+        }
+    ));
+    markdown.push_str(&format!(
+        "root_target_seconds: {}\n",
+        match mode {
+            TranscriptMode::Quality => config.effective_quality_chunk_seconds(),
+            TranscriptMode::Raw => config.chunk_seconds,
+        }
+    ));
+    markdown.push_str("quality_gate_version: \"rust-quality-signals-v1\"\n");
+    markdown.push_str(&format!(
+        "quality_review_status: \"{quality_review_status}\"\n"
+    ));
+    markdown.push_str(&format!(
+        "quality_gate_status: \"{}\"\n",
+        match mode {
+            TranscriptMode::Raw => "not_applicable",
+            TranscriptMode::Quality if quality_review_advisory_present => {
+                "audio_reviewed_with_advisory"
+            }
+            TranscriptMode::Quality if quality_review_segments > 0 => "audio_reviewed",
+            TranscriptMode::Quality => "no_signal_detected",
+        }
+    ));
+    markdown.push_str(&format!(
+        "quality_review_segments: {quality_review_segments}\n"
+    ));
+    markdown.push_str(&format!(
+        "quality_bootstrap_segments: {quality_bootstrap_segments}\n"
+    ));
+    markdown.push_str(&format!(
+        "quality_host_cleanup_turns: {quality_cleanup_turns}\n"
+    ));
+    markdown.push_str(&format!(
+        "quality_review_triggers: {}\n",
+        serde_json::to_string(&quality_trigger_codes).context("无法序列化质量复核触发原因")?
+    ));
+    markdown.push_str(&format!(
+        "quality_residual_advisories: {}\n",
+        serde_json::to_string(&quality_residual_advisory_codes)
+            .context("无法序列化质量复核残留告警")?
+    ));
+    markdown.push_str(&format!(
+        "final_transcript_segments_from_base: {}\n",
+        parts.len().saturating_sub(quality_review_segments)
+    ));
+    markdown.push_str(&format!(
+        "final_transcript_segments_from_review: {quality_review_segments}\n"
+    ));
     markdown.push_str(&format!("segments: {}\n", parts.len()));
     markdown.push_str(&format!(
-        "accepted_model_responses: {}\n",
+        "accounted_model_responses: {}\n",
         completions.len()
     ));
     markdown.push_str(&format!(
@@ -255,10 +365,10 @@ pub fn render_transcript(
         serde_json::to_string(&speaker_ids).context("无法序列化说话人列表")?
     ));
     markdown.push_str(&format!(
-        "usage_reported_for_all_accepted_responses: {usage_reported_for_all_requests}\n"
+        "usage_reported_for_all_accounted_responses: {usage_reported_for_all_requests}\n"
     ));
     markdown.push_str(&format!(
-        "reasoning_tokens_reported_for_all_accepted_responses: {reasoning_tokens_reported_for_all_requests}\n"
+        "reasoning_tokens_reported_for_all_accounted_responses: {reasoning_tokens_reported_for_all_requests}\n"
     ));
     markdown.push_str(&format!("reported_prompt_tokens: {prompt_tokens}\n"));
     markdown.push_str(&format!(
@@ -268,19 +378,42 @@ pub fn render_transcript(
     markdown.push_str(&format!(
         "reported_visible_output_tokens: {visible_output_tokens}\n"
     ));
-    markdown.push_str(&format!("reported_accepted_cost_usd: {cost:.9}\n"));
-    markdown.push_str("---\n\n");
+    markdown.push_str(&format!("reported_accounted_cost_usd: {cost:.9}\n"));
     markdown.push_str(&format!(
-        "# {} {}\n\n",
+        "reported_responses_by_model: {}\n",
+        serde_json::to_string(&responses_by_model).context("无法序列化按模型响应数")?
+    ));
+    markdown.push_str(&format!(
+        "reported_cost_usd_by_model: {}\n",
+        serde_json::to_string(&cost_by_model).context("无法序列化按模型费用")?
+    ));
+    markdown.push_str("---\n\n");
+    let review_suffix = if mode == TranscriptMode::Quality && quality_review_advisory_present {
+        "（含需复核片段）"
+    } else {
+        ""
+    };
+    markdown.push_str(&format!(
+        "# {} {}{}\n\n",
         escape_markdown_text(title),
-        mode.title()
+        mode.title(),
+        review_suffix,
     ));
 
     for part in parts {
+        let review_label = if part.quality_residual_advisory_codes.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "（需复核：{}）",
+                part.quality_residual_advisory_codes.join(",")
+            )
+        };
         markdown.push_str(&format!(
-            "## {}–{}\n\n",
+            "## {}–{}{}\n\n",
             format_timestamp(part.start_ms),
-            format_timestamp(part.end_ms)
+            format_timestamp(part.end_ms),
+            review_label,
         ));
         markdown.push_str(part.completion.text.trim());
         markdown.push_str("\n\n");
@@ -524,6 +657,11 @@ mod tests {
             speaker_ids: vec!["S1".into()],
             turn_count: 1,
             acoustic_coverage_warning: false,
+            quality_reviewed: true,
+            quality_review_advisory: false,
+            quality_cleanup_turns: 1,
+            quality_trigger_codes: vec!["mechanical_repetition".into()],
+            quality_residual_advisory_codes: Vec::new(),
         };
         let markdown = render_transcript(
             Path::new("meeting.wav"),
@@ -539,10 +677,45 @@ mod tests {
         .unwrap();
         assert!(markdown.contains("transcript_mode: \"quality\""));
         assert!(markdown.contains("transcript_editing: \"faithful_readability_cleanup\""));
+        assert!(markdown.contains("quality_review_model_requested: \"google/gemini-3.7-flash\""));
+        assert!(markdown.contains("quality_review_status: \"completed\""));
+        assert!(markdown.contains("quality_review_segments: 1"));
+        assert!(markdown.contains("quality_host_cleanup_turns: 1"));
+        assert!(markdown.contains("quality_review_triggers: [\"mechanical_repetition\"]"));
+        assert!(markdown.contains("quality_residual_advisories: []"));
         assert!(markdown.contains("# meeting 高质量转写稿"));
         assert!(markdown.contains("chinese_script: \"zh-Hans\""));
         assert!(markdown.contains("chinese_normalization: \"opencc-t2s\""));
+        assert!(markdown.contains("speaker_alignment_status: \"all_labels_assigned\""));
 
+        let mut advisory_part = part.clone();
+        advisory_part.quality_review_advisory = true;
+        advisory_part.acoustic_coverage_warning = true;
+        advisory_part.quality_residual_advisory_codes = vec!["acoustic_coverage_warning".into()];
+        let advisory_markdown = render_transcript(
+            Path::new("meeting.wav"),
+            &Config::default(),
+            &AudioInfo {
+                duration_ms: 1_000,
+                codec: "pcm_s16le".into(),
+                container: "wav".into(),
+            },
+            &[advisory_part],
+            TranscriptMode::Quality,
+        )
+        .unwrap();
+        assert!(advisory_markdown.contains("quality_review_status: \"completed_with_advisory\""));
+        assert!(advisory_markdown.contains("# meeting 高质量转写稿（含需复核片段）"));
+        assert!(
+            advisory_markdown.contains("## 00:00:00–00:00:01（需复核：acoustic_coverage_warning）")
+        );
+
+        let mut raw_part = part;
+        raw_part.quality_reviewed = false;
+        raw_part.quality_review_advisory = false;
+        raw_part.quality_cleanup_turns = 0;
+        raw_part.quality_trigger_codes.clear();
+        raw_part.quality_residual_advisory_codes.clear();
         let raw_markdown = render_transcript(
             Path::new("meeting.wav"),
             &Config::default(),
@@ -551,12 +724,14 @@ mod tests {
                 codec: "pcm_s16le".into(),
                 container: "wav".into(),
             },
-            &[part],
+            &[raw_part],
             TranscriptMode::Raw,
         )
         .unwrap();
         assert!(raw_markdown.contains("transcript_mode: \"raw\""));
         assert!(raw_markdown.contains("transcript_editing: \"verbatim\""));
+        assert!(raw_markdown.contains("quality_review_model_requested: null"));
+        assert!(raw_markdown.contains("quality_review_status: \"not_applicable\""));
         assert!(raw_markdown.contains("# meeting 原始逐字稿"));
     }
 }

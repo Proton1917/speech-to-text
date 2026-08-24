@@ -10,14 +10,15 @@ spt --raw "/path/to/会议录音.m4a"
 # 输出：/path/to/会议录音.raw.md（原始逐字版）
 ```
 
-当前默认模型与 provider：
+当前默认后端路由与 provider：
 
 ```text
-model    = google/gemini-3.5-flash-lite
-provider = google-vertex/global
+基础转写 / raw / OCR / 说话人映射 = google/gemini-3.5-flash-lite
+可疑 quality 片段独立重听          = google/gemini-3.7-flash
+provider                            = google-vertex/global
 ```
 
-截至 2026-08-23，OpenRouter 模型目录确认该模型支持 `audio` 和 `image` 输入；`google-vertex/global` 是它的有效 endpoint tag。
+截至 2026-08-24，OpenRouter 实时目录确认两个模型都支持 `audio`、`response_format` 和 `structured_outputs`，`google-vertex/global` 同时是两者的 ZDR endpoint。quality 的首个最长 5 分钟 TARGET 直接由 3.7 建立可靠术语与说话人起点；后续 Lite TARGET 只有被 Rust 门禁判定可疑时才升级，不会让整段音频无条件双跑。
 
 ## 工作方式
 
@@ -26,17 +27,19 @@ provider = google-vertex/global
   → 扩展名 allowlist + 普通文件/文件名校验
   → FFprobe 检查真实媒体内容和流类型
   → FFmpeg 一次性解码成单声道 32 kHz 无损 FLAC 母版
-  → 规划连续、无重叠的 15 分钟 TARGET
-  → 阶段 A 按 quality（默认）或 raw 模式处理 exact TARGET，生成正文、时间和片内 L1/L2
+  → raw 规划最长 15 分钟 TARGET；quality 规划最长 5 分钟 TARGET
+  → quality 首个 TARGET 由 3.7 处理；后续阶段 A 由基础模型生成正文、时间和片内 L1/L2
   → Rust 使用内置 OpenCC t2s 将中文正文确定性归一化为 zh-Hans
-  → FFmpeg 能量覆盖提示发现明显空洞；异常时重听一次并记录 advisory
+  → quality：Rust 规范中文标点周边排版，并检测系统性汉字空格、重复、填充词、听不清和声学告警
+  → quality 可疑：只将当前 TARGET 升级给 Gemini 3.7 Flash 独立重听
+  → raw：跳过质量升级，始终由基础模型保留原始口语
   → 阶段 B 把历史 S 参考、边界上下文和本片 L 候选合成短 MP3
-  → 同一个模型只返回 L→S/NEW/UNKNOWN；Rust 持有并更新全局 S1/S2/S3
+  → 基础模型只返回 L→S/NEW/UNKNOWN；Rust 持有并更新全局 S1/S2/S3
   → 全部片段成功后按时间顺序合并
   → 在源文件同目录以 `0600` 权限原子写入 Markdown
 ```
 
-程序不会下载本地 diarization 模型，也不会把数小时音频整体读入内存。简繁转换使用嵌入二进制的 OpenCC 文字词典，不是语音模型、不需要外部数据文件，也不增加 OpenRouter 调用。SpeakerHarness 只在任务内保存无损母版上的短参考范围，每次临时合成后上传给当前 OpenRouter provider，请求结束立即删除。临时目录为 `0700`、媒体为 `0600`，临时空间、HTTP 尝试次数和自适应深度都有硬上限。Ctrl-C 会协作式取消网络与 FFmpeg 并清理临时内容。阶段 A 正文无法可靠完成时整项失败；阶段 B 身份对齐失败时不会丢正文，而是显式降为 `UNKNOWN`。
+程序不会下载本地 diarization 或转写模型，也不会把数小时音频整体读入内存。Lite 与 3.7 路由共享同一个 HTTPS client、串行信号量和任务级 HTTP 次数预算，不能通过换模型绕过成本上限。简繁转换使用嵌入二进制的 OpenCC 文字词典，不增加 OpenRouter 调用。SpeakerHarness 只在任务内保存无损母版上的短参考范围，每次临时合成后上传给当前 OpenRouter provider，请求结束立即删除。临时目录为 `0700`、媒体为 `0600`，临时空间、HTTP 尝试次数和自适应深度都有硬上限。Ctrl-C 会协作式取消网络与 FFmpeg 并清理临时内容。
 
 ## 安装
 
@@ -101,7 +104,9 @@ spt --force "会议录音.m4a"
 spt --raw --force "会议录音.m4a"
 ```
 
-默认 quality 模式会清理无意义口头禅、结巴、卡顿、机械重复和被立即放弃的错误开头，补全自然标点；仍完整保留事实、数字、专名、观点、否定、条件、不确定性和任务要求，不总结、不改变立场、不重排内容、不合并不同 turn。
+默认 quality 模式的首个最长 5 分钟 TARGET 直接使用 3.7，避免用 Lite 草稿建立错误术语；后续 TARGET 先使用 Lite。Rust 会确定性转换中文上下文的半角标点并清理标点两侧普通空格，但不会删除可能分隔姓名、列表或代码的汉字间空格；系统性异常空格会作为信号交给 3.7。门禁还检测机械重复、高密度强填充词、听不清标记、编码损坏、过多未完句和 FFmpeg 声学覆盖告警。没有发现信号时采用 Lite；命中可疑信号时，让 Gemini 3.7 Flash 对同一 TARGET 独立重听。复核后，Rust 只折叠已知连接词/代词结巴和纯应答连写，保留“好好学习、非常非常重要、人人”等正常叠词，并记录 `quality_host_cleanup_turns`。3.7 仍必须完整保留事实、数字、专名、观点、否定、条件、不确定性和任务要求，不总结、不改变立场、不重排内容。
+
+Rust 门禁不会根据词频猜测公司名、中药名或技术名。表面通顺但实际听错的专名仍可能需要术语表或人工复核；经过 3.7 后仍存在声学/文本 advisory 时，标题和 front matter 会明确标记“含需复核片段”，不会再把警告隐藏在无条件“高质量”名称下面。
 
 `--raw` 模式保留语气词、口头禅、结巴、卡顿、重复、自我修正、错误开头和不完整句，只补充必要标点。高质量版与原始版使用独立输出路径，可以同时存在：
 
@@ -125,9 +130,12 @@ spt --raw --force "会议录音.m4a"
 
 ```bash
 spt --model google/gemini-3.5-flash-lite
+spt --quality-model google/gemini-3.7-flash
 ```
 
 OpenRouter 模型代号含 `/`，因此它是 `--model` 的参数值。正确写法是 `spt --model <MODEL_ID>`，不是动态选项 `spt --<MODEL_ID>`。
+
+默认基础模型为 Gemini 3.5 Flash Lite，quality 模型为 Gemini 3.7 Flash。显式执行 `--model` 后，该自定义模型同时覆盖基础转写与质量复核，保持“设置后一直使用该模型”的原有合同；如需再次拆分两路，可使用 `--quality-model`。`spt config` 会同时显示两者。
 
 列出当前 OpenRouter 目录中声明支持音频输入的模型：
 
@@ -191,8 +199,9 @@ spt config
 主要参数：
 
 ```toml
-schema_version = 2
+schema_version = 3
 model = "google/gemini-3.5-flash-lite"
+quality_review_model = "google/gemini-3.7-flash"
 provider = "google-vertex/global" # 或 "any"
 chunk_seconds = 900
 overlap_seconds = 30
@@ -212,9 +221,9 @@ max_transcript_bytes = 67108864
 max_total_turns = 100000
 ```
 
-通常只需通过 CLI 修改 `model` 和 `provider`。其他参数用于针对特定录音密度和限流条件调整，不应把 `split_output_tokens` 设置到 `max_output_tokens` 以上。
+通常只需通过 CLI 修改 `model`、`quality_review_model` 和 `provider`。`spt --model X` 同时设置两路，`spt --quality-model Y` 只调整质量路由。quality 的有效根 TARGET 上限还会由后端显示为 `effective_quality_chunk_seconds`，默认 300 秒；raw 继续使用 `chunk_seconds=900`。其他参数用于针对特定录音密度和限流条件调整，不应把 `split_output_tokens` 设置到 `max_output_tokens` 以上。
 
-v0.2 首次运行会把 schema v1 迁移为 v2。旧版标准值 `300/6000/5000/3` 会作为一次明确的行为升级改为 `900/16000/12000/1`；这不是“完全保留旧行为”的无损迁移，而是启用 SpeakerHarness 所必需的版本迁移。
+v0.4 首次运行会把 schema v1/v2 原子迁移为 v3。为了避免旧用户在不知情时把音频发送给另一模型，任何旧配置都先令 `quality_review_model=model`；升级用户可再显式执行 `spt --quality-model google/gemini-3.7-flash` 启用默认双路。旧版 v1 的标准值 `300/6000/5000/3` 仍会升级为 SpeakerHarness 所需的 `900/16000/12000/1`。
 
 ### OCR
 
@@ -245,7 +254,7 @@ spt ocr "扫描件.png"
   → 从清晰单人发言保存最多约 6 秒的母版范围
 
 第二段 TARGET 15:00–30:00
-  → 阶段 A 只听 exact TARGET，按本次 quality/raw 模式冻结正文和新的 L1/L2
+  → 阶段 A 只听 exact TARGET；quality 门禁可在冻结前让 3.7 独立重听
   → 阶段 B 在同一个短 packet 中听 S1/S2 参考与 L1/L2 候选
   → 只返回 L1→S2、L2→S1 等映射，不能改正文或时间
   → 新声音返回 NEW1，再由 Rust 分配为 S3
@@ -255,7 +264,7 @@ OpenRouter 请求本身没有隐式记忆。所谓“记住”是 Rust 明确保
 
 阶段 A 的 exact TARGET，以及阶段 B 的历史参考、最多 30 秒边界上下文和局部候选，全部直接从同一份无损母版取样，不做递归 MP3 重编码。阶段 B 只发送一个短合成 packet，因此不依赖 provider 对多音频附件的兼容行为。边界上下文和参考窗口从数据结构上就没有正文输出权。
 
-阶段 A 还使用 FFmpeg `silencedetect` 做保守的本地能量覆盖提示：模型返回的 turns 中有长连续活动空洞、整体覆盖明显过低，或声明 `no_speech` 但本地存在持续能量时，会要求重新听一次。FFmpeg 无法区分人声、掌声、音乐、引擎声和环境噪声，所以第二次仍冲突时不会仅凭能量拒绝结构合法的正文，而是在 front matter 记录 `ffmpeg_energy_advisory_warning`，不把能量检测冒充 VAD。它不下载模型、不生成文字，也不能证明逐字 100% 无误。
+阶段 A 还使用 FFmpeg `silencedetect` 做保守的本地能量覆盖提示：Lite 重听后仍有长连续活动空洞、整体覆盖明显过低，或声明 `no_speech` 但本地存在持续能量时，quality 会升级 3.7；raw 继续记录 advisory。FFmpeg 无法区分人声、掌声、音乐、引擎声和环境噪声，所以 3.7 后仍冲突时不会仅凭能量拒绝结构合法的正文，而是标记 `completed_with_advisory` 和“含需复核片段”，不把能量检测冒充 VAD。
 
 该模式属于 `reference-assisted speaker matching`，可以维持整项任务的编号一致性，但不是生物声纹鉴定。极其相似的声音、变声、电话信道变化、极短插话或多人抢话仍可能得到 `UNKNOWN` 或误匹配；正式稿会在 front matter 中明确标记 `best_effort`，不会声称身份已验证。
 
@@ -263,14 +272,14 @@ OpenRouter 请求本身没有隐式记忆。所谓“记住”是 Rust 明确保
 
 模型返回前无法精确知道转写会产生多少 Token。因此 `spt` 使用两层策略：
 
-1. 请求前按 15 分钟 TARGET 主动切分，避免把完整长音频一次送入模型。
+1. raw 请求前按最长 15 分钟 TARGET 主动切分；quality 使用最长 5 分钟根 TARGET，使首段 3.7 bootstrap 和后续按需升级保持可控。
 2. 单段返回 `finish_reason=length`、HTTP 413、明确的上下文超限错误，或可靠统计的可见输出达到 `split_output_tokens` 时，把这一段从无损母版的时间中点二分后重新转写。隐藏 reasoning tokens 不计入可见输出阈值。
 
 如果阶段 A 已经缩短到 `min_chunk_seconds` 附近或达到 `max_adaptive_depth`，仍无法通过长度、循环或结构门禁，整项任务会失败，不会拼入截断或非法文字。所有 FFmpeg 能量覆盖冲突都只属于上述 advisory；没有真正 speech VAD 时不把非静音当作必须存在文字的证据。HTTP 408/409/429/500/502/503/504/524/529 和可识别的临时 provider 错误只做有限重试，并优先遵守数值型 `Retry-After`；不会偷偷更换用户固定的 provider。
 
 TARGET 按连续、无重叠的无损时间轴覆盖全部采样。阶段 A 的时间坐标始终从 exact TARGET 的 `0` 开始，切点处的半句话也必须按实际可听后缀/前缀转写；身份阶段才听前 30 秒边界上下文。自适应二分严格先完成左半段的正文与身份状态，再处理右半段，不会产生两个并发编号空间。首版不做全文模糊去重，以免误删真实重复内容。
 
-尾段不足 30 秒时会向前移动最后一个边界，让尾段至少保留 30 秒，而不是生成几秒钟的小请求；每个 TARGET 都不会超过配置的 15 分钟硬上限。
+尾段不足有效 `min_chunk_seconds` 时会向前移动最后一个边界，而不是生成几秒钟的小请求；raw TARGET 不超过 15 分钟，quality TARGET 不超过 5 分钟各自的硬上限。
 
 ## 输出格式
 
@@ -278,6 +287,7 @@ TARGET 按连续、无重叠的无损时间轴覆盖全部采样。阶段 A 的�
 
 - 源文件名、真实 codec/container 和音频时长；
 - `transcript_mode` 与 `transcript_editing`，明确区分默认高质量稿和原始逐字稿；
+- `transcription_strategy`、基础模型、quality 模型、bootstrap/复核片段数、初始触发原因、复核后残留 advisory 及最终正文来源；
 - 请求模型/provider，以及 API 有报告时的模型/provider；缺失时明确回落为请求值；
 - 分段数、被接受的模型响应数、API 已报告的 Token 使用量、reasoning tokens 和费用；
 - 每段的确定性音频边界。
@@ -285,7 +295,7 @@ TARGET 按连续、无重叠的无损时间轴覆盖全部采样。阶段 A 的�
 - FFmpeg 能量覆盖状态；`advisory_warning` 只表示能量与 `no_speech` 冲突，不能当作语音判定。
 - `chinese_script: zh-Hans` 与 `chinese_normalization: opencc-t2s`，记录确定性简体归一化。
 
-时间标题表示本地无损母版的切分边界，不是模型猜测的逐句时间戳。字段使用 `reported_*` 前缀；`usage_reported_for_all_accepted_responses` 会说明已接受响应的统计是否完整。`reported_accepted_cost_usd` 统计最终正文响应和成功身份映射响应；语义重试、失败映射或自适应二分前被丢弃的响应可能已经产生额外费用。
+时间标题表示本地无损母版的切分边界，不是模型猜测的逐句时间戳。字段使用 `reported_*` 前缀；`accounted_model_responses` 和 `reported_accounted_cost_usd` 汇总所有被任务账本保留的完整响应，包括最终正文、触发质量升级的 Lite 草稿、可归属到后续叶片的 split 前响应和成功身份映射。HTTP/结构重试中没有可用 usage 的失败响应仍可能产生目录无法报告的额外费用；`reported_responses_by_model` 与 `reported_cost_usd_by_model` 给出模型级拆分。
 
 ## 开发验证
 
@@ -303,7 +313,7 @@ OpenRouter 是付费外部服务，默认单元测试不会发送真实 API 请�
 - 媒体路径始终作为独立参数传给 FFmpeg，不经过 shell；文件名中的空格、中文或 shell 元字符不会被执行。
 - 模型输出只作为不可信文本写入 Markdown，不参与路径构造，也不会触发命令或工具调用。
 - 音频和图片提示中明确把媒体内的指令视为待转写/待识别内容，避免媒体内提示注入改变任务。
-- 两阶段都使用 strict JSON Schema；Rust 再检查 TARGET 时间、局部标签、能量覆盖提示、L→S 映射、全局 ID、新说话人数和实际有声参考范围。阶段 A 正文冻结后，阶段 B 没有改写或删除正文的接口。
+- Lite、3.7 与身份阶段都使用 strict JSON Schema；Rust 再检查 TARGET 时间、局部标签、质量信号、能量覆盖提示、L→S 映射、全局 ID、新说话人数和实际有声参考范围。3.7 复核发生在正文冻结和身份对齐之前；阶段 B 没有改写或删除正文的接口。
 - 说话人参考只保存母版绝对时间范围；临时 packet 和 Base64 不写日志、不进入 Markdown、不持久保存。
 - 参考声音会随每个后续 packet 再次发送给当前 provider；使用 `--provider any` 表示用户接受由 OpenRouter 自动选择承载这些参考声音的 provider。
 - 请求采用 HTTPS；API Key 只进入敏感 `Authorization` header。

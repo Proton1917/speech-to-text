@@ -11,6 +11,7 @@ use tempfile::NamedTempFile;
 use crate::security::{secure_directory, secure_file};
 
 pub const DEFAULT_MODEL: &str = "google/gemini-3.5-flash-lite";
+pub const DEFAULT_QUALITY_REVIEW_MODEL: &str = "google/gemini-3.7-flash";
 pub const DEFAULT_PROVIDER: &str = "google-vertex/global";
 pub const ANY_PROVIDER: &str = "any";
 
@@ -60,11 +61,15 @@ impl ConfigLock {
 }
 
 const fn default_schema_version() -> u32 {
-    2
+    3
 }
 
 fn default_model() -> String {
     DEFAULT_MODEL.to_owned()
+}
+
+fn default_quality_review_model() -> String {
+    DEFAULT_QUALITY_REVIEW_MODEL.to_owned()
 }
 
 fn default_provider() -> String {
@@ -135,11 +140,14 @@ const fn default_max_total_turns() -> u64 {
     100_000
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+const QUALITY_ROOT_CHUNK_SECONDS: u64 = 300;
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub schema_version: u32,
     pub model: String,
+    pub quality_review_model: String,
     pub provider: String,
     pub chunk_seconds: u64,
     pub overlap_seconds: u64,
@@ -197,9 +205,11 @@ impl Default for LegacyConfigV1 {
 
 impl From<LegacyConfigV1> for Config {
     fn from(legacy: LegacyConfigV1) -> Self {
+        let quality_review_model = legacy.model.clone();
         Self {
             schema_version: legacy.schema_version,
             model: legacy.model,
+            quality_review_model,
             provider: legacy.provider,
             chunk_seconds: legacy.chunk_seconds,
             min_chunk_seconds: legacy.min_chunk_seconds,
@@ -220,6 +230,7 @@ impl Default for Config {
         Self {
             schema_version: default_schema_version(),
             model: default_model(),
+            quality_review_model: default_quality_review_model(),
             provider: default_provider(),
             chunk_seconds: default_chunk_seconds(),
             overlap_seconds: default_overlap_seconds(),
@@ -298,11 +309,12 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         if self.schema_version != default_schema_version() {
             bail!(
-                "不支持的配置 schema_version={}；当前仅支持 2",
+                "不支持的配置 schema_version={}；当前仅支持 3",
                 self.schema_version
             );
         }
         validate_model_id(&self.model)?;
+        validate_model_id(&self.quality_review_model)?;
         validate_provider_id(&self.provider)?;
         if !(30..=900).contains(&self.chunk_seconds) {
             bail!("SpeakerHarness 的 chunk_seconds 必须在 30 到 900 之间");
@@ -365,8 +377,23 @@ impl Config {
         self.provider.eq_ignore_ascii_case(ANY_PROVIDER)
     }
 
+    /// Uses the stronger backend review model only for the built-in Lite default.
+    /// An explicit `--model` override remains authoritative for every model call.
+    pub fn effective_quality_review_model(&self) -> &str {
+        &self.quality_review_model
+    }
+
+    pub fn effective_quality_chunk_seconds(&self) -> u64 {
+        self.chunk_seconds.min(QUALITY_ROOT_CHUNK_SECONDS)
+    }
+
+    pub fn effective_quality_min_chunk_seconds(&self) -> u64 {
+        self.min_chunk_seconds
+            .min(self.effective_quality_chunk_seconds() / 2)
+    }
+
     fn migrate_v1(&mut self) {
-        self.schema_version = 2;
+        self.schema_version = default_schema_version();
         if self.chunk_seconds == 300 {
             self.chunk_seconds = default_chunk_seconds();
         } else {
@@ -411,15 +438,22 @@ fn decode_config(raw: &str) -> Result<(Config, bool)> {
             let legacy: LegacyConfigV1 = toml::from_str(raw).context("无法解析 v1 配置")?;
             (Config::from(legacy), true)
         }
-        2 => (
-            toml::from_str::<Config>(raw).context("无法解析 v2 配置")?,
+        2 => {
+            let mut config = toml::from_str::<Config>(raw).context("无法解析 v2 配置")?;
+            config.schema_version = default_schema_version();
+            config.quality_review_model = config.model.clone();
+            (config, true)
+        }
+        3 => (
+            toml::from_str::<Config>(raw).context("无法解析 v3 配置")?,
             false,
         ),
-        version => bail!("不支持的配置 schema_version={version}；当前仅支持 1 和 2"),
+        version => bail!("不支持的配置 schema_version={version}；当前仅支持 1、2 和 3"),
     };
-    if migrated {
+    if version == 1 {
         config.migrate_v1();
-    } else if config.normalize_v2_overlap_bound() {
+    }
+    if config.normalize_v2_overlap_bound() {
         migrated = true;
     }
     config.validate()?;
@@ -514,10 +548,46 @@ mod tests {
     fn defaults_are_valid() {
         let config = Config::default();
         config.validate().unwrap();
-        assert_eq!(config.schema_version, 2);
+        assert_eq!(config.schema_version, 3);
         assert_eq!(config.chunk_seconds, 900);
         assert_eq!(config.overlap_seconds, 30);
         assert_eq!(config.parallel_requests, 1);
+        assert_eq!(
+            config.effective_quality_review_model(),
+            DEFAULT_QUALITY_REVIEW_MODEL
+        );
+        assert_eq!(config.effective_quality_chunk_seconds(), 300);
+    }
+
+    #[test]
+    fn explicit_model_override_remains_authoritative_for_quality_review() {
+        let config = Config {
+            model: "anthropic/claude-sonnet-4.5".to_owned(),
+            quality_review_model: "anthropic/claude-sonnet-4.5".to_owned(),
+            ..Config::default()
+        };
+        assert_eq!(
+            config.effective_quality_review_model(),
+            "anthropic/claude-sonnet-4.5"
+        );
+    }
+
+    #[test]
+    fn quality_root_window_is_hard_capped_and_clamps_runtime_split_minimum() {
+        let smaller = Config {
+            chunk_seconds: 120,
+            min_chunk_seconds: 30,
+            ..Config::default()
+        };
+        assert_eq!(smaller.effective_quality_chunk_seconds(), 120);
+
+        let large_minimum = Config {
+            chunk_seconds: 900,
+            min_chunk_seconds: 200,
+            ..Config::default()
+        };
+        assert_eq!(large_minimum.effective_quality_chunk_seconds(), 300);
+        assert_eq!(large_minimum.effective_quality_min_chunk_seconds(), 150);
     }
 
     #[test]
@@ -542,6 +612,7 @@ mod tests {
         let encoded = toml::to_string(&config).unwrap();
         let decoded: Config = toml::from_str(&encoded).unwrap();
         assert_eq!(decoded.model, DEFAULT_MODEL);
+        assert_eq!(decoded.quality_review_model, DEFAULT_QUALITY_REVIEW_MODEL);
         assert_eq!(decoded.provider, DEFAULT_PROVIDER);
     }
 
@@ -556,7 +627,7 @@ mod tests {
             ..Config::default()
         };
         config.migrate_v1();
-        assert_eq!(config.schema_version, 2);
+        assert_eq!(config.schema_version, 3);
         assert_eq!(config.chunk_seconds, 900);
         assert_eq!(config.max_output_tokens, 16_000);
         assert_eq!(config.split_output_tokens, 12_000);
@@ -616,7 +687,21 @@ mod tests {
             decode_config("schema_version = 2\noverlap_seconds = 120\n").unwrap();
         assert!(migrated);
         assert_eq!(config.overlap_seconds, 30);
+        assert_eq!(config.schema_version, 3);
+        assert_eq!(config.quality_review_model, DEFAULT_MODEL);
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn v2_custom_model_migration_does_not_silently_add_another_model() {
+        let (config, migrated) = decode_config(
+            "schema_version = 2\nmodel = \"anthropic/claude-sonnet-4.5\"\nprovider = \"any\"\n",
+        )
+        .unwrap();
+        assert!(migrated);
+        assert_eq!(config.schema_version, 3);
+        assert_eq!(config.model, "anthropic/claude-sonnet-4.5");
+        assert_eq!(config.quality_review_model, "anthropic/claude-sonnet-4.5");
     }
 
     #[test]
@@ -643,10 +728,11 @@ mod tests {
     fn missing_schema_version_uses_v1_defaults_before_migration() {
         let (config, migrated) = decode_config("parallel_requests = 3\n").unwrap();
         assert!(migrated);
-        assert_eq!(config.schema_version, 2);
+        assert_eq!(config.schema_version, 3);
         assert_eq!(config.chunk_seconds, 900);
         assert_eq!(config.max_output_tokens, 16_000);
         assert_eq!(config.split_output_tokens, 12_000);
         assert_eq!(config.parallel_requests, 1);
+        assert_eq!(config.quality_review_model, DEFAULT_MODEL);
     }
 }

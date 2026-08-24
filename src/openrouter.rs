@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 use tokio::time::sleep;
 
-use crate::config::{Config, DEFAULT_MODEL, validate_model_id};
+use crate::config::{Config, DEFAULT_MODEL, DEFAULT_QUALITY_REVIEW_MODEL, validate_model_id};
 
 const API_BASE: &str = "https://openrouter.ai/api/v1";
 const MAX_REQUEST_MEDIA_BYTES: usize = 32 * 1024 * 1024;
@@ -23,7 +23,7 @@ const MAX_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct OpenRouterClient {
-    http: reqwest::Client,
+    http: Arc<reqwest::Client>,
     api_key_present: bool,
     config: Config,
     semaphore: Arc<Semaphore>,
@@ -159,11 +159,27 @@ impl OpenRouterClient {
         let parallel_requests = config.parallel_requests;
 
         Ok(Self {
-            http,
+            http: Arc::new(http),
             api_key_present: !key.is_empty(),
             config,
             semaphore: Arc::new(Semaphore::new(parallel_requests)),
             http_attempts: Arc::new(AtomicU32::new(0)),
+        })
+    }
+
+    /// Derives a client for another model without rebuilding the authenticated HTTP client or
+    /// resetting the task-wide concurrency and HTTP-attempt budgets.
+    pub fn routed_to_model(&self, model: &str) -> Result<Self> {
+        let mut config = self.config.clone();
+        config.model = model.to_owned();
+        config.validate()?;
+
+        Ok(Self {
+            http: Arc::clone(&self.http),
+            api_key_present: self.api_key_present,
+            config,
+            semaphore: Arc::clone(&self.semaphore),
+            http_attempts: Arc::clone(&self.http_attempts),
         })
     }
 
@@ -756,7 +772,10 @@ fn build_chat_payload(config: &Config, content: Value, response_format: Option<V
         "messages": [{"role": "user", "content": content}],
         "max_tokens": config.max_output_tokens,
     });
-    if config.model == DEFAULT_MODEL {
+    if matches!(
+        config.model.as_str(),
+        DEFAULT_MODEL | DEFAULT_QUALITY_REVIEW_MODEL
+    ) {
         payload["seed"] = json!(0);
         payload["reasoning"] = json!({"effort": "minimal"});
     }
@@ -1067,6 +1086,59 @@ mod tests {
             structured.pointer("/response_format/type"),
             Some(&json!("json_schema"))
         );
+    }
+
+    #[test]
+    fn lite_and_quality_review_payloads_use_deterministic_minimal_reasoning() {
+        for model in [DEFAULT_MODEL, DEFAULT_QUALITY_REVIEW_MODEL] {
+            let config = Config {
+                model: model.to_owned(),
+                ..Config::default()
+            };
+            let payload = build_chat_payload(&config, json!([]), None);
+            assert_eq!(payload.get("model"), Some(&json!(model)));
+            assert_eq!(payload.get("seed"), Some(&json!(0)));
+            assert_eq!(
+                payload.pointer("/reasoning/effort"),
+                Some(&json!("minimal"))
+            );
+        }
+
+        let other = Config {
+            model: "anthropic/claude-sonnet-4.5".to_owned(),
+            ..Config::default()
+        };
+        let payload = build_chat_payload(&other, json!([]), None);
+        assert!(payload.get("seed").is_none());
+        assert!(payload.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn routed_client_validates_model_and_shares_transport_and_budgets() {
+        let config = Config {
+            max_http_attempts: 2,
+            ..Config::default()
+        };
+        let client = OpenRouterClient::from_environment(config, false).unwrap();
+        let routed = client
+            .routed_to_model(DEFAULT_QUALITY_REVIEW_MODEL)
+            .unwrap();
+
+        assert_eq!(client.config.model, DEFAULT_MODEL);
+        assert_eq!(routed.config.model, DEFAULT_QUALITY_REVIEW_MODEL);
+        assert_eq!(routed.config.provider, client.config.provider);
+        assert_eq!(routed.api_key_present, client.api_key_present);
+        assert!(Arc::ptr_eq(&client.http, &routed.http));
+        assert!(Arc::ptr_eq(&client.semaphore, &routed.semaphore));
+        assert!(Arc::ptr_eq(&client.http_attempts, &routed.http_attempts));
+
+        client.reserve_http_attempt_with_floor(0).unwrap();
+        assert_eq!(routed.http_attempts.load(Ordering::Relaxed), 1);
+        routed.reserve_http_attempt_with_floor(0).unwrap();
+        assert!(client.reserve_http_attempt_with_floor(0).is_err());
+
+        assert!(client.routed_to_model("invalid model").is_err());
+        assert_eq!(client.config.model, DEFAULT_MODEL);
     }
 
     #[test]

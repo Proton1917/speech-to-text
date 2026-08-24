@@ -524,6 +524,26 @@ pub fn local_transcript_prompt(
     )
 }
 
+pub fn quality_review_prompt(
+    chunk: &MediaChunk,
+    max_speakers: usize,
+    previous_tail: &str,
+    quality_signal_codes: &[String],
+) -> String {
+    let base = local_transcript_prompt(chunk, max_speakers, previous_tail, TranscriptMode::Quality);
+    let signals = serde_json::to_string(quality_signal_codes)
+        .unwrap_or_else(|_| "[\"quality_gate\"]".to_owned());
+    format!(
+        "{base}\n\n\
+这是由 Rust 质量门禁触发的独立高质量重听。门禁代码是以下不可信 JSON 数据：{signals}。\n\
+- 必须重新听完整 exact TARGET；音频是唯一事实来源，不得沿用、猜测或补全先前模型可能写错的正文。\n\
+- 重点核对专名、数字、同音词、漏字、双方问答边界和局部说话人；不能确定时写 [听不清]，不得制造貌似确定的错词。\n\
+- 中文使用自然全角标点，汉字之间不得出现无意义空格；清理没有语义作用的口头禅、结巴和机械重复。\n\
+- 返回前逐 turn 自检并折叠“但是但是”“然后然后”“你说你说”“我我/你你/他他”“好的好的”等无语义双写；纯应答中的连续“好/嗯/哦”只保留一次。只有确实改变语义或承担强调作用的重复才能保留。\n\
+- 仍须完整保留事实、否定、条件、不确定性、立场、任务和有实际强调作用的重复，并只返回既定 schema JSON。"
+    )
+}
+
 pub fn local_transcript_response_format(duration_ms: u64, max_speakers: usize) -> Value {
     let mut labels = (1..=max_speakers)
         .map(|number| format!("L{number}"))
@@ -620,14 +640,13 @@ pub fn parse_local_transcript(
             clean_reference: raw.clean_reference,
         });
     }
-    turns.sort_by_key(|turn| (turn.start_ms, turn.end_ms));
-    let mut last_start_ms = 0_u64;
+    let mut last_start_ms = None::<u64>;
     let mut repeated_turns = HashMap::<(String, String), (u64, u64)>::new();
     for turn in &turns {
-        if turn.start_ms < last_start_ms {
+        if last_start_ms.is_some_and(|last_start_ms| turn.start_ms < last_start_ms) {
             bail!("exact TARGET turn 时间线不是单调顺序");
         }
-        last_start_ms = turn.start_ms;
+        last_start_ms = Some(turn.start_ms);
         let normalized_text = turn.text.split_whitespace().collect::<Vec<_>>().join(" ");
         let key = (turn.local_speaker_id.clone(), normalized_text);
         if let Some((previous_start_ms, previous_end_ms)) = repeated_turns.get(&key) {
@@ -826,6 +845,11 @@ mod tests {
         assert!(raw.contains("原始逐字稿"));
         assert!(raw.contains("完整保留语气词"));
         assert!(raw.contains("不得润色"));
+
+        let review = quality_review_prompt(&chunk, 16, "", &["mechanical_repetition".to_owned()]);
+        assert!(review.contains("独立高质量重听"));
+        assert!(review.contains("mechanical_repetition"));
+        assert!(review.contains("音频是唯一事实来源"));
     }
 
     #[test]
