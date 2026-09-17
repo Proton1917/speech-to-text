@@ -185,7 +185,7 @@ KEY_SENTINEL='spt-test-key-never-write-this-value'
     '    exit 99' \
     '  fi' \
     '  printf "%s\\n" "config_clean" >>"$event_log"' \
-    '  printf "%s\\n" "asr_model=qwen/qwen3-asr-1.7b" "quality_asr_model=fish-audio/transcribe-1" "asr_provider=deepinfra" "quality_asr_provider=fish-audio" "effective_quality_review_model=google/gemini-3.7-flash" "provider=google-vertex/global"' \
+    '  printf "%s\\n" "asr_model=qwen/qwen3-asr-1.7b" "quality_asr_model=fish-audio/transcribe-1" "asr_provider=deepinfra" "quality_asr_provider=fish-audio" "effective_quality_review_model=example/overlay" "provider=google-vertex/global"' \
     '  exit 0' \
     'fi' \
     '[[ ${OPENROUTER_API_KEY:-} == "$expected_key" ]] || {' \

@@ -17,7 +17,7 @@ use tokio::sync::Semaphore;
 use tokio::time::sleep;
 
 use crate::asr::canonical_content;
-use crate::config::{ANY_PROVIDER, Config, DEFAULT_MODEL, validate_model_id, validate_provider_id};
+use crate::config::{ANY_PROVIDER, Config, validate_model_id, validate_provider_id};
 
 const API_BASE: &str = "https://openrouter.ai/api/v1";
 const MAX_REQUEST_MEDIA_BYTES: usize = 32 * 1024 * 1024;
@@ -2154,9 +2154,13 @@ fn build_chat_payload(config: &Config, content: Value, response_format: Option<V
         "messages": [{"role": "user", "content": content}],
         "max_tokens": config.max_output_tokens,
     });
-    if config.model == DEFAULT_MODEL {
-        payload["seed"] = json!(0);
-        payload["reasoning"] = json!({"effort": "minimal"});
+    if let Some(options) = config.effective_chat_model_options(&config.model) {
+        if let Some(seed) = options.seed {
+            payload["seed"] = json!(seed);
+        }
+        if let Some(effort) = &options.reasoning_effort {
+            payload["reasoning"] = json!({"effort": effort});
+        }
     }
     if let Some(response_format) = response_format {
         payload["response_format"] = response_format;
@@ -2452,7 +2456,7 @@ async fn backoff_with_retry_after(attempt: u32, retry_after: Option<Duration>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{DEFAULT_PROVIDER, DEFAULT_QUALITY_REVIEW_MODEL};
+    use crate::config::model_defaults;
 
     #[test]
     fn extracts_string_or_structured_content() {
@@ -2487,7 +2491,7 @@ mod tests {
         let payload = build_chat_payload(&pinned, json!([]), None);
         assert_eq!(
             payload.pointer("/provider/only/0"),
-            Some(&json!(DEFAULT_PROVIDER))
+            Some(&json!(model_defaults().routes.provider.as_str()))
         );
         assert_eq!(
             payload.pointer("/provider/allow_fallbacks"),
@@ -2502,9 +2506,10 @@ mod tests {
             Some(&json!("deny"))
         );
         assert_eq!(payload.pointer("/provider/zdr"), Some(&json!(true)));
+        let options = pinned.effective_chat_model_options(&pinned.model);
         assert_eq!(
-            payload.pointer("/reasoning/effort"),
-            Some(&json!("minimal"))
+            payload.pointer("/reasoning/effort").and_then(Value::as_str),
+            options.and_then(|options| options.reasoning_effort.as_deref())
         );
 
         let any = Config {
@@ -2832,7 +2837,7 @@ mod tests {
     fn rejected_accounting_is_shared_and_atomically_drained() {
         let client = OpenRouterClient::from_environment(Config::default(), false).unwrap();
         let routed = client
-            .routed_to_model(DEFAULT_QUALITY_REVIEW_MODEL)
+            .routed_to_model(model_defaults().routes.quality_review_model.as_str())
             .unwrap();
         assert!(Arc::ptr_eq(
             &client.rejected_accounting,
@@ -3320,26 +3325,41 @@ mod tests {
     }
 
     #[test]
-    fn lite_and_quality_review_payloads_use_deterministic_minimal_reasoning() {
-        for model in [DEFAULT_MODEL, DEFAULT_QUALITY_REVIEW_MODEL] {
-            let config = Config {
-                model: model.to_owned(),
-                ..Config::default()
-            };
-            let payload = build_chat_payload(&config, json!([]), None);
-            assert_eq!(payload.get("model"), Some(&json!(model)));
-            assert_eq!(payload.get("seed"), Some(&json!(0)));
-            assert_eq!(
-                payload.pointer("/reasoning/effort"),
-                Some(&json!("minimal"))
-            );
-        }
-
-        let other = Config {
-            model: "anthropic/claude-sonnet-4.5".to_owned(),
+    fn chat_options_follow_exact_configured_models_and_allow_disabling_defaults() {
+        let mut config = Config {
+            model: "example/new-overlay".into(),
+            quality_review_model: "example/quality-overlay".into(),
             ..Config::default()
         };
-        let payload = build_chat_payload(&other, json!([]), None);
+        let payload = build_chat_payload(&config, json!([]), None);
+        assert!(payload.get("seed").is_none());
+        assert!(payload.get("reasoning").is_none());
+
+        config.chat_model_options.insert(
+            config.model.clone(),
+            crate::config::ChatModelOptions {
+                seed: Some(42),
+                reasoning_effort: Some("low".into()),
+            },
+        );
+        let payload = build_chat_payload(&config, json!([]), None);
+        assert_eq!(payload["model"], "example/new-overlay");
+        assert_eq!(payload["seed"], 42);
+        assert_eq!(payload["reasoning"]["effort"], "low");
+        assert_eq!(payload["provider"]["only"][0], config.provider);
+        let client = OpenRouterClient::from_environment(config.clone(), false).unwrap();
+        let quality = client
+            .routed_to_model(&config.quality_review_model)
+            .unwrap();
+        let payload = build_chat_payload(&quality.config, json!([]), None);
+        assert!(payload.get("seed").is_none());
+        assert!(payload.get("reasoning").is_none());
+
+        config.model = model_defaults().routes.model.clone();
+        config
+            .chat_model_options
+            .insert(config.model.clone(), Default::default());
+        let payload = build_chat_payload(&config, json!([]), None);
         assert!(payload.get("seed").is_none());
         assert!(payload.get("reasoning").is_none());
     }
@@ -3352,11 +3372,14 @@ mod tests {
         };
         let client = OpenRouterClient::from_environment(config, false).unwrap();
         let routed = client
-            .routed_to_model(DEFAULT_QUALITY_REVIEW_MODEL)
+            .routed_to_model(model_defaults().routes.quality_review_model.as_str())
             .unwrap();
 
-        assert_eq!(client.config.model, DEFAULT_MODEL);
-        assert_eq!(routed.config.model, DEFAULT_QUALITY_REVIEW_MODEL);
+        assert_eq!(client.config.model, model_defaults().routes.model.as_str());
+        assert_eq!(
+            routed.config.model,
+            model_defaults().routes.quality_review_model.as_str()
+        );
         assert_eq!(routed.config.provider, client.config.provider);
         assert_eq!(routed.api_key_present, client.api_key_present);
         assert!(Arc::ptr_eq(&client.http, &routed.http));
@@ -3373,7 +3396,7 @@ mod tests {
         assert!(client.reserve_http_attempt_with_floor(0).is_err());
 
         assert!(client.routed_to_model("invalid model").is_err());
-        assert_eq!(client.config.model, DEFAULT_MODEL);
+        assert_eq!(client.config.model, model_defaults().routes.model.as_str());
     }
 
     #[test]
@@ -3384,7 +3407,7 @@ mod tests {
         };
         let client = OpenRouterClient::from_environment(config, false).unwrap();
         let routed = client
-            .routed_to_model(DEFAULT_QUALITY_REVIEW_MODEL)
+            .routed_to_model(model_defaults().routes.quality_review_model.as_str())
             .unwrap();
         assert_eq!(client.max_catalog_requests(), 16);
         assert_eq!(derived_catalog_request_cap(10_000), 40_008);
@@ -3405,8 +3428,8 @@ mod tests {
         let completion = Completion {
             origin: CompletionOrigin::Chat,
             text: String::new(),
-            model: DEFAULT_MODEL.into(),
-            provider: DEFAULT_PROVIDER.into(),
+            model: model_defaults().routes.model.as_str().into(),
+            provider: model_defaults().routes.provider.as_str().into(),
             model_reported_by_api: true,
             provider_reported_by_api: true,
             prompt_tokens: 10,

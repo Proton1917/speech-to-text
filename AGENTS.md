@@ -23,14 +23,14 @@ This repository contains the Rust backend and CLI for spt. The frontend has not 
 
 ## Current defaults
 
-Verified against the live OpenRouter catalog and a controlled synthetic fixture on 2026-08-24:
+Gemini overlay was updated against the live OpenRouter model/endpoint and ZDR catalogs on 2026-09-08. The MAI quality route was validated against the live OpenRouter model, endpoint and ZDR catalogs on 2026-09-16. The historical controlled synthetic fixture was recorded on 2026-08-24 with Fish Audio and Gemini 3.7; it does not validate the current MAI/Gemini routes:
 
 ~~~text
 Primary STT model       = qwen/qwen3-asr-1.7b
 Primary STT endpoint    = deepinfra
-Quality STT model       = fish-audio/transcribe-1
-Quality STT endpoint    = fish-audio
-Raw/quality overlay     = google/gemini-3.7-flash
+Quality STT model       = microsoft/mai-transcribe-2
+Quality STT endpoint    = azure
+Raw/quality overlay     = google/gemini-3.8-flash
 Overlay endpoint        = google-vertex/global
 STT API                 = https://openrouter.ai/api/v1/audio/transcriptions
 Chat API                = https://openrouter.ai/api/v1/chat/completions
@@ -44,6 +44,7 @@ The STT OpenAPI does not expose Chat provider.only. Fixed STT mode is therefore 
 - src/asr.rs: Primary/Quality STT validation, pre-OpenCC source comparison, frozen display-text restoration and UNKNOWN fallback.
 - src/chinese.rs: embedded OpenCC t2s with fact-span and Japanese-kana preservation.
 - src/cleanup.rs: quality-only presentation punctuation cleanup; spoken disfluencies are signaled but preserved, with lexical projection audit and whole-turn fallback.
+- defaults/models.toml: bundled release routes, historical migration identities and model request profiles.
 - src/config.rs: defaults, v1-v3 migration, strict v4 validation, route ID validation, private atomic TOML storage.
 - src/media.rs: no-follow fixed input snapshots, demuxer/protocol validation, canonical FLAC duration checks, exact 120-second targets, FFmpeg activity ranges and bounded speaker packets.
 - src/openrouter.rs: bounded HTTPS, secret headers, retry classification, dedicated STT schemas, Chat schemas, live catalogs and route checks.
@@ -54,6 +55,13 @@ The STT OpenAPI does not expose Chat provider.only. Fixed STT mode is therefore 
 - benchmarks/: offline CER/fact/speaker metrics, paid-run guard, private fixtures and versioned baseline snapshots.
 
 FFmpeg is an intentional subprocess boundary. Pass paths as Command arguments; never interpolate them into a shell command.
+
+## Model configuration contract
+
+- Keep Rust orchestration independent of model names and versions. Maintain release routes, historical migration identities and bundled request profiles in defaults/models.toml.
+- Existing explicit user routes take precedence and are never replaced by a new release default. Routine model changes use configuration, without rebuilding Rust.
+- Resolve seed/reasoning options by exact model ID from user chat_model_options, then bundled profiles. A user entry replaces the entire profile; an empty entry disables it. Unlisted models receive no implicit options.
+- Preserve historical benchmark model IDs. Use fixed test fixtures or read bundled defaults in tests, so changing release defaults does not require editing Rust assertions.
 
 ## Safety invariants
 
@@ -110,3 +118,4 @@ The tracked synthetic baseline is benchmarks/baselines/v0.5.0-synthetic-zh-aba.t
 - 2026-08-24: v0.3.0 added independent quality and raw output paths.
 - 2026-08-24: v0.4.0 added the Gemini Lite/3.7 surface-gated cascade, schema v3 and Homebrew source/bottle delivery.
 - 2026-08-24: v0.5.0 replaced Gemini text authority with dedicated STT, added schema v4, sampled/verify-all cross-ASR evidence, fact-protected OpenCC display text, presentation-only cleanup, per-turn SpeakerHarness mapping, fixed no-follow input snapshots, canonical-duration checks, honest route/cost provenance, OCR rejected-response accounting and bounded ~/.spt lock shards. Release gates pass with 212 library tests, 11 CLI tests, 12 benchmark tests, strict Clippy, release build and Windows cross-build/link. One-run synthetic and pinned ASCEND human-splice A-B-A snapshots both recorded CER 0 and S1-S2-S1 on their narrow fixtures; neither is a meeting/DER claim, and real-meeting acceptance remains open.
+- 2026-09-16: v0.6.0 externalized release routes and chat request profiles into defaults/models.toml, moved raw/quality/OCR overlay defaults to Gemini 3.8 Flash, retained Qwen3 ASR 1.7B as the Chinese Primary, and replaced Fish Audio with ZDR MAI-Transcribe-2/Azure as the independent quality verifier. Historical v0.5 benchmarks remain evidence for the old Fish/Gemini 3.7 routes only.

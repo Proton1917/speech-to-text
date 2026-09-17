@@ -2075,6 +2075,20 @@ fn sync_directory(_path: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    // Fixed metadata fixtures must not change when release defaults change.
+    fn test_config() -> Config {
+        Config {
+            model: "example/overlay".into(),
+            quality_review_model: "example/overlay".into(),
+            asr_model: "qwen/qwen3-asr-1.7b".into(),
+            quality_asr_model: "fish-audio/transcribe-1".into(),
+            provider: "google-vertex/global".into(),
+            asr_provider: "deepinfra".into(),
+            quality_asr_provider: "fish-audio".into(),
+            ..Config::default()
+        }
+    }
+
     #[test]
     fn formats_long_and_fractional_timestamps() {
         assert_eq!(format_timestamp(0), "00:00:00");
@@ -2529,7 +2543,7 @@ mod tests {
         };
         let markdown = render_ocr(
             Path::new("scan.png"),
-            &Config::default(),
+            &test_config(),
             &ImageInfo {
                 codec: "mjpeg".into(),
                 container: "jpeg_pipe".into(),
@@ -2581,7 +2595,7 @@ mod tests {
         rejected.text = "untrusted rejected text".into();
         let error = render_ocr(
             Path::new("scan.png"),
-            &Config::default(),
+            &test_config(),
             &ImageInfo {
                 codec: "mjpeg".into(),
                 container: "jpeg_pipe".into(),
@@ -2661,7 +2675,7 @@ mod tests {
     #[test]
     fn quality_metadata_describes_dedicated_stt_and_exact_crosscheck_honestly() {
         let part = dedicated_stt_part();
-        let markdown = render_part(&part, &Config::default(), TranscriptMode::Quality);
+        let markdown = render_part(&part, &test_config(), TranscriptMode::Quality);
 
         assert!(markdown.contains("transcript_mode: \"quality\""));
         assert!(
@@ -2676,11 +2690,9 @@ mod tests {
         assert!(markdown.contains("quality_asr_model: \"fish-audio/transcribe-1\""));
         assert!(markdown.contains("quality_asr_provider: \"fish-audio\""));
         assert!(markdown.contains("quality_asr_provider_expected: \"fish-audio\""));
-        assert!(
-            markdown.contains("multimodal_overlay_model_configured: \"google/gemini-3.7-flash\"")
-        );
+        assert!(markdown.contains("multimodal_overlay_model_configured: \"example/overlay\""));
         assert!(markdown.contains("multimodal_overlay_used: false"));
-        assert!(markdown.contains("quality_overlay_model_requested: \"google/gemini-3.7-flash\""));
+        assert!(markdown.contains("quality_overlay_model_requested: \"example/overlay\""));
         assert!(
             markdown.contains("multimodal_overlay_provider_configured: \"google-vertex/global\"")
         );
@@ -2772,7 +2784,7 @@ mod tests {
         skipped.quality_trigger_codes = vec!["asr_crosscheck_skipped_cost_bounded".into()];
         let markdown = render_transcript(
             Path::new("meeting.wav"),
-            &Config::default(),
+            &test_config(),
             &AudioInfo {
                 duration_ms: 2_000,
                 codec: "pcm_s16le".into(),
@@ -2805,7 +2817,7 @@ mod tests {
         part.auxiliary_completions.push(Completion {
             origin: CompletionOrigin::Chat,
             text: String::new(),
-            model: "google/gemini-3.7-flash".into(),
+            model: "example/overlay".into(),
             provider: "Google".into(),
             model_reported_by_api: true,
             provider_reported_by_api: true,
@@ -2816,7 +2828,7 @@ mod tests {
             usage_reported: true,
             reasoning_tokens_reported: true,
         });
-        let markdown = render_part(&part, &Config::default(), TranscriptMode::Quality);
+        let markdown = render_part(&part, &test_config(), TranscriptMode::Quality);
 
         assert!(markdown.contains("accounted_response_providers: \"Google, unreported\""));
         assert!(markdown.contains("stt_providers_reported_by_api: \"\""));
@@ -2826,7 +2838,7 @@ mod tests {
         assert!(markdown.contains(
             "reported_model_bucket_policy: \"only_api_reported_model_values_no_requested_fallback\""
         ));
-        assert!(markdown.contains("reported_responses_by_model: {\"google/gemini-3.7-flash\":1}"));
+        assert!(markdown.contains("reported_responses_by_model: {\"example/overlay\":1}"));
         assert!(!markdown.contains("reported_responses_by_model: {\"test/model\""));
         assert!(markdown.contains("responses_without_model_reported_by_api: 1"));
         assert!(markdown.contains("reported_cost_usd_without_model_reported_by_api: 0.004000000"));
@@ -2839,7 +2851,7 @@ mod tests {
             provider: "any".into(),
             asr_provider: "any".into(),
             quality_asr_provider: "any".into(),
-            ..Config::default()
+            ..test_config()
         };
         let markdown = render_part(&dedicated_stt_part(), &config, TranscriptMode::Quality);
 
@@ -2862,7 +2874,7 @@ mod tests {
         part.quality_cleanup_turns = 1;
         part.quality_trigger_codes
             .push("quality_cleanup_chinese_punctuation_normalized".into());
-        let markdown = render_part(&part, &Config::default(), TranscriptMode::Quality);
+        let markdown = render_part(&part, &test_config(), TranscriptMode::Quality);
 
         assert!(markdown.contains("quality_host_cleanup_turns: 1"));
         assert!(markdown.contains("quality_host_cleanup_status: \"applied\""));
@@ -2877,11 +2889,8 @@ mod tests {
     fn speaker_assignment_completeness_remains_separate_from_accuracy() {
         let mut unresolved_part = dedicated_stt_part();
         unresolved_part.speaker_ids = vec!["UNKNOWN".into()];
-        let unresolved_markdown = render_part(
-            &unresolved_part,
-            &Config::default(),
-            TranscriptMode::Quality,
-        );
+        let unresolved_markdown =
+            render_part(&unresolved_part, &test_config(), TranscriptMode::Quality);
         assert!(
             unresolved_markdown
                 .contains("speaker_label_assignment_status: \"unknown_labels_present\"")
@@ -2897,11 +2906,8 @@ mod tests {
         disagreement_part.quality_review_advisory = true;
         disagreement_part.quality_residual_advisory_codes =
             vec!["asr_crosscheck_disagreement".into()];
-        let disagreement_markdown = render_part(
-            &disagreement_part,
-            &Config::default(),
-            TranscriptMode::Quality,
-        );
+        let disagreement_markdown =
+            render_part(&disagreement_part, &test_config(), TranscriptMode::Quality);
         assert!(
             disagreement_markdown
                 .contains("asr_crosscheck_status: \"disagreement_requires_review\"")
@@ -2934,11 +2940,8 @@ mod tests {
         unavailable_part.quality_review_advisory = true;
         unavailable_part.quality_residual_advisory_codes =
             vec!["asr_crosscheck_unavailable".into()];
-        let unavailable_markdown = render_part(
-            &unavailable_part,
-            &Config::default(),
-            TranscriptMode::Quality,
-        );
+        let unavailable_markdown =
+            render_part(&unavailable_part, &test_config(), TranscriptMode::Quality);
         assert!(
             unavailable_markdown.contains("asr_crosscheck_status: \"unavailable_requires_review\"")
         );
@@ -2955,7 +2958,7 @@ mod tests {
         raw_part.quality_review_advisory = false;
         raw_part.quality_trigger_codes.clear();
         raw_part.quality_residual_advisory_codes.clear();
-        let raw_markdown = render_part(&raw_part, &Config::default(), TranscriptMode::Raw);
+        let raw_markdown = render_part(&raw_part, &test_config(), TranscriptMode::Raw);
         assert!(raw_markdown.contains("transcript_mode: \"raw\""));
         assert!(
             raw_markdown
@@ -2965,10 +2968,7 @@ mod tests {
         assert!(raw_markdown.contains("quality_asr_provider: null"));
         assert!(raw_markdown.contains("quality_asr_provider_expected: null"));
         assert!(raw_markdown.contains("quality_review_model_requested: null"));
-        assert!(
-            raw_markdown
-                .contains("multimodal_overlay_model_configured: \"google/gemini-3.7-flash\"")
-        );
+        assert!(raw_markdown.contains("multimodal_overlay_model_configured: \"example/overlay\""));
         assert!(raw_markdown.contains("multimodal_overlay_used: false"));
         assert!(raw_markdown.contains("quality_overlay_model_requested: null"));
         assert!(raw_markdown.contains("quality_review_status: \"not_applicable\""));
@@ -2986,7 +2986,7 @@ mod tests {
         part.completion.completion_tokens = 0;
         part.completion.usage_reported = false;
         part.completion.reasoning_tokens_reported = false;
-        let markdown = render_part(&part, &Config::default(), TranscriptMode::Raw);
+        let markdown = render_part(&part, &test_config(), TranscriptMode::Raw);
         assert!(markdown.contains("stt_token_counts_may_be_unavailable: true"));
         assert!(markdown.contains("usage_reported_for_all_accounted_responses: false"));
         assert!(markdown.contains("reported_prompt_tokens: 0"));
@@ -2999,7 +2999,7 @@ mod tests {
             asr_provider: "any".into(),
             quality_asr_provider: "any".into(),
             provider: "any".into(),
-            ..Config::default()
+            ..test_config()
         };
         let markdown = render_part(&dedicated_stt_part(), &config, TranscriptMode::Quality);
         assert!(markdown.contains("provider_privacy_mode: \"any_explicit_privacy_downgrade\""));
@@ -3017,8 +3017,8 @@ mod tests {
     fn legacy_review_metadata_is_preserved_only_when_a_part_was_actually_reviewed() {
         let mut legacy_part = dedicated_stt_part();
         legacy_part.quality_reviewed = true;
-        let markdown = render_part(&legacy_part, &Config::default(), TranscriptMode::Quality);
-        assert!(markdown.contains("quality_review_model_requested: \"google/gemini-3.7-flash\""));
+        let markdown = render_part(&legacy_part, &test_config(), TranscriptMode::Quality);
+        assert!(markdown.contains("quality_review_model_requested: \"example/overlay\""));
         assert!(markdown.contains("quality_review_status: \"completed\""));
         assert!(markdown.contains("quality_review_segments: 1"));
     }

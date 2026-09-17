@@ -1,0 +1,25 @@
+# Release bootstrap data. Existing user routes are never overwritten.
+# Runtime overrides belong in the user's config.toml.
+[routes]
+model = "google/gemini-3.8-flash"
+quality_review_model = "google/gemini-3.8-flash"
+asr_model = "qwen/qwen3-asr-1.7b"
+quality_asr_model = "microsoft/mai-transcribe-2"
+provider = "google-vertex/global"
+asr_provider = "deepinfra"
+quality_asr_provider = "azure"
+
+# Historical schema identities; do not change when bumping current routes.
+[legacy]
+model = "google/gemini-3.5-flash-lite"
+quality_review_model = "google/gemini-3.7-flash"
+
+# Exact model keys: an unlisted model receives no implicit extra parameters.
+# User entries replace the entire matching profile; an empty table disables it.
+[chat_model_options."google/gemini-3.8-flash"]
+seed = 0
+reasoning_effort = "minimal"
+
+[chat_model_options."google/gemini-3.7-flash"]
+seed = 0
+reasoning_effort = "minimal"

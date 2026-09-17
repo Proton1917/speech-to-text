@@ -17,7 +17,7 @@ use spt::transcript::TranscriptMode;
     long_about = "spt 使用 OpenRouter 专用 speech-to-text 模型生成 provider source；Rust 校验后冻结事实片段受保护的 OpenCC 展示投影，再由受约束的音频多模态模型切分 turn，并由 Rust SpeakerHarness 维护跨片段说话人编号。\n\n直接给出合法音频路径后，会在源文件同一目录生成同名 Markdown 文字稿。专用 STT TARGET 最长 120 秒，以规避上游处理超时；模型和 provider 预期值会持久保存，直到再次修改。",
     arg_required_else_help = false,
     disable_help_subcommand = true,
-    after_help = "常用指令：\n  spt <AUDIO_PATH>                         成本有界的 quality 清稿，输出同名 .md\n  spt --verify-all <AUDIO_PATH>            每个 TARGET 都运行第二路 ASR 核验\n  spt --raw <AUDIO_PATH>                   单 ASR 未清稿，输出同名 .raw.md\n  spt --force <AUDIO_PATH>                 完整成功后原子替换已有目标稿件\n  spt --asr-model <MODEL_ID>               持久设置正文专用 STT 模型\n  spt --quality-asr-model <MODEL_ID>       持久设置 quality 交叉检查 STT 模型\n  spt --asr-provider <TAG|any>             保存正文 STT endpoint；any 为隐私降级\n  spt --quality-asr-provider <TAG|any>     保存检查 STT endpoint；any 为隐私降级\n  spt --model <MODEL_ID>                   同时设置 raw/quality overlay 模型\n  spt --quality-model <MODEL_ID>           仅设置 quality overlay 模型\n  spt --provider <ENDPOINT_TAG|any>        设置 overlay provider；any 为隐私降级\n  spt asr-models [SEARCH]                  列出专用 speech-to-text 模型\n  spt asr-providers [MODEL_ID]             列出专用 STT 模型 endpoints\n  spt models [SEARCH]                      列出 Chat Audio 多模态模型\n  spt providers [MODEL_ID]                 列出多模态模型 endpoints\n  spt config                               查看生效配置，不显示 API Key\n  spt ocr <IMAGE_PATH>                     OCR 单张图片，生成 *.ocr.md\n  spt help [COMMAND]                       显示完整介绍或指定子命令帮助\n\n示例：\n  spt \"会议录音.m4a\"\n  spt --verify-all \"会议录音.m4a\"\n  spt --raw \"会议录音.m4a\"\n  spt --asr-model qwen/qwen3-asr-1.7b --asr-provider deepinfra\n  spt --quality-asr-model fish-audio/transcribe-1 --quality-asr-provider fish-audio\n  spt --model google/gemini-3.7-flash --provider google-vertex/global\n\n说明：\n  - 默认正文来自 OpenRouter 专用 STT；Rust 冻结经校验、事实片段受保护的 OpenCC 展示投影，而非 provider 原始响应字节。\n  - quality 对首段及此后约每 10 分钟抽检独立 STT，--verify-all 改为全量核验；一致仍不等于真值。空 Primary 的第二路结果只记录复核告警，不回填正文。\n  - 多模态模型只负责把已冻结的展示正文切成 turn 和比较短声音样本，不得改写事实正文。\n  - 默认 quality 只做事实字符不变的主机标点清理；疑似 filler/口吃只标 signal，不自动删字；--raw 跳过清稿和第二路 ASR。\n  - STT API 暂不支持 Chat API 的 provider.only；固定模式只接受目录中唯一且为 ZDR 的 endpoint。\n  - OPENROUTER_API_KEY 只从环境变量读取，不会写入配置。\n  - 中文正文只保护事实标签值、成对引号/书名号内容、inline code、URL/email 和显式指定字形；无标签专名仍按普通 OpenCC t2s 转换。\n  - 首次执行非帮助操作时会原子写入默认配置并创建同目录 .config.lock；v1-v3 配置会在锁内迁移为 v4。\n  - 配置路径优先级为 SPT_CONFIG_PATH、XDG_CONFIG_HOME/spt/config.toml、~/.config/spt/config.toml。\n  - 默认不覆盖已有输出；只有 --force 会在完整结果就绪后原子替换。"
+    after_help = "常用指令：\n  spt <AUDIO_PATH>                         成本有界的 quality 清稿，输出同名 .md\n  spt --verify-all <AUDIO_PATH>            每个 TARGET 都运行第二路 ASR 核验\n  spt --raw <AUDIO_PATH>                   单 ASR 未清稿，输出同名 .raw.md\n  spt --force <AUDIO_PATH>                 完整成功后原子替换已有目标稿件\n  spt --asr-model <MODEL_ID>               持久设置正文专用 STT 模型\n  spt --quality-asr-model <MODEL_ID>       持久设置 quality 交叉检查 STT 模型\n  spt --asr-provider <TAG|any>             保存正文 STT endpoint；any 为隐私降级\n  spt --quality-asr-provider <TAG|any>     保存检查 STT endpoint；any 为隐私降级\n  spt --model <MODEL_ID>                   同时设置 raw/quality overlay 模型\n  spt --quality-model <MODEL_ID>           仅设置 quality overlay 模型\n  spt --provider <ENDPOINT_TAG|any>        设置 overlay provider；any 为隐私降级\n  spt asr-models [SEARCH]                  列出专用 speech-to-text 模型\n  spt asr-providers [MODEL_ID]             列出专用 STT 模型 endpoints\n  spt models [SEARCH]                      列出 Chat Audio 多模态模型\n  spt providers [MODEL_ID]                 列出多模态模型 endpoints\n  spt config                               查看生效配置，不显示 API Key\n  spt ocr <IMAGE_PATH>                     OCR 单张图片，生成 *.ocr.md\n  spt help [COMMAND]                       显示完整介绍或指定子命令帮助\n\n示例：\n  spt \"会议录音.m4a\"\n  spt --verify-all \"会议录音.m4a\"\n  spt --raw \"会议录音.m4a\"\n  spt --asr-model <STT_MODEL_ID> --asr-provider <ENDPOINT_TAG>\n  spt --quality-asr-model <STT_MODEL_ID> --quality-asr-provider <ENDPOINT_TAG>\n  spt --model <MODEL_ID> --provider <ENDPOINT_TAG>\n\n说明：\n  - 默认正文来自 OpenRouter 专用 STT；Rust 冻结经校验、事实片段受保护的 OpenCC 展示投影，而非 provider 原始响应字节。\n  - quality 对首段及此后约每 10 分钟抽检独立 STT，--verify-all 改为全量核验；一致仍不等于真值。空 Primary 的第二路结果只记录复核告警，不回填正文。\n  - 多模态模型只负责把已冻结的展示正文切成 turn 和比较短声音样本，不得改写事实正文。\n  - 默认 quality 只做事实字符不变的主机标点清理；疑似 filler/口吃只标 signal，不自动删字；--raw 跳过清稿和第二路 ASR。\n  - STT API 暂不支持 Chat API 的 provider.only；固定模式只接受目录中唯一且为 ZDR 的 endpoint。\n  - OPENROUTER_API_KEY 只从环境变量读取，不会写入配置。\n  - 中文正文只保护事实标签值、成对引号/书名号内容、inline code、URL/email 和显式指定字形；无标签专名仍按普通 OpenCC t2s 转换。\n  - 首次执行非帮助操作时会原子写入默认配置并创建同目录 .config.lock；v1-v3 配置会在锁内迁移为 v4。\n  - 配置路径优先级为 SPT_CONFIG_PATH、XDG_CONFIG_HOME/spt/config.toml、~/.config/spt/config.toml。\n  - 默认不覆盖已有输出；只有 --force 会在完整结果就绪后原子替换。"
 )]
 struct Cli {
     /// 要转写的本地音频文件
@@ -334,6 +334,15 @@ async fn run() -> Result<()> {
     if changed {
         println!("model={}", config.model);
         println!("quality_review_model={}", config.quality_review_model);
+        for (label, model) in [
+            ("model_options", &config.model),
+            ("quality_model_options", &config.quality_review_model),
+        ] {
+            println!(
+                "{label}={}",
+                serde_json::json!(config.effective_chat_model_options(model))
+            );
+        }
         println!("asr_model={}", config.asr_model);
         println!("quality_asr_model={}", config.quality_asr_model);
         println!("provider={}", config.provider);
@@ -395,16 +404,16 @@ fn command_topic_guide(name: &str) -> Option<&'static str> {
             "图片 OCR\n\n用法：\n  spt ocr <IMAGE_PATH>\n  spt ocr --force <IMAGE_PATH>\n\n输出：\n  在图片旁生成 <IMAGE_STEM>.ocr.md。\n\n支持格式：\n  png, jpg, jpeg, webp\n\n示例：\n  spt ocr \"/path/to/扫描件.png\"",
         ),
         "models" => Some(
-            "Chat Audio 模型目录\n\n用法：\n  spt models [SEARCH]\n\n作用：\n  查询 OpenRouter 当前声明支持音频输入的通用多模态模型；这些模型用于 turn/说话人 overlay，不是默认正文 STT。\n\n示例：\n  spt models gemini\n  spt --model google/gemini-3.7-flash",
+            "Chat Audio 模型目录\n\n用法：\n  spt models [SEARCH]\n\n作用：\n  查询 OpenRouter 当前声明支持音频输入的通用多模态模型；这些模型用于 turn/说话人 overlay，不是默认正文 STT。\n\n示例：\n  spt models <SEARCH>\n  spt --model <MODEL_ID>",
         ),
         "asr-models" | "asr_models" => Some(
-            "专用 STT 模型目录\n\n用法：\n  spt asr-models [SEARCH]\n\n作用：\n  查询 OpenRouter /audio/transcriptions 的 audio→transcription 模型。固定 provider 模式仍会在付费前要求目录唯一 endpoint 与 ZDR。\n\n示例：\n  spt asr-models qwen\n  spt --asr-model qwen/qwen3-asr-1.7b",
+            "专用 STT 模型目录\n\n用法：\n  spt asr-models [SEARCH]\n\n作用：\n  查询 OpenRouter /audio/transcriptions 的 audio→transcription 模型。固定 provider 模式仍会在付费前要求目录唯一 endpoint 与 ZDR。\n\n示例：\n  spt asr-models <SEARCH>\n  spt --asr-model <STT_MODEL_ID>",
         ),
         "providers" => Some(
-            "Chat Audio Provider 目录\n\n用法：\n  spt providers [MODEL_ID]\n\n作用：\n  列出通用多模态模型的 endpoint tag；省略 MODEL_ID 时使用当前已保存模型。spt --provider any 允许 OpenRouter 自动路由，属于显式隐私降级。\n\n示例：\n  spt providers google/gemini-3.7-flash\n  spt --provider google-vertex/global",
+            "Chat Audio Provider 目录\n\n用法：\n  spt providers [MODEL_ID]\n\n作用：\n  列出通用多模态模型的 endpoint tag；省略 MODEL_ID 时使用当前已保存模型。spt --provider any 允许 OpenRouter 自动路由，属于显式隐私降级。\n\n示例：\n  spt providers <MODEL_ID>\n  spt --provider <ENDPOINT_TAG>",
         ),
         "asr-providers" | "asr_providers" => Some(
-            "专用 STT Provider 目录\n\n用法：\n  spt asr-providers [MODEL_ID]\n\n作用：\n  列出专用 STT 模型的 endpoint。STT OpenAPI 当前没有 provider.only；固定模式只接受目录中唯一且为 ZDR 的 endpoint。spt --asr-provider any 和 spt --quality-asr-provider any 接受自动路由，均属于显式隐私降级。\n\n示例：\n  spt asr-providers qwen/qwen3-asr-1.7b\n  spt --asr-provider deepinfra",
+            "专用 STT Provider 目录\n\n用法：\n  spt asr-providers [MODEL_ID]\n\n作用：\n  列出专用 STT 模型的 endpoint。STT OpenAPI 当前没有 provider.only；固定模式只接受目录中唯一且为 ZDR 的 endpoint。spt --asr-provider any 和 spt --quality-asr-provider any 接受自动路由，均属于显式隐私降级。\n\n示例：\n  spt asr-providers <STT_MODEL_ID>\n  spt --asr-provider <ENDPOINT_TAG>",
         ),
         "config" => Some(
             "查看配置\n\n用法：\n  spt config\n\n作用：\n  显示专用 STT、quality STT、多模态 overlay、各自 provider 及资源预算。只显示 OPENROUTER_API_KEY 是否已设置，绝不显示 Key 内容。\n  首次执行非帮助操作时，spt 会原子写入默认配置并创建同目录 .config.lock；已有 v1-v3 配置会在锁内迁移为 v4。\n  配置路径依次取非空 SPT_CONFIG_PATH、非空 XDG_CONFIG_HOME 下的 spt/config.toml、~/.config/spt/config.toml。\n\n持久修改：\n  spt --asr-model <MODEL_ID>\n  spt --quality-asr-model <MODEL_ID>\n  spt --asr-provider <ENDPOINT_TAG|any>    # any 为显式隐私降级\n  spt --quality-asr-provider <ENDPOINT_TAG|any> # any 为显式隐私降级\n  spt --model <MULTIMODAL_MODEL_ID>\n  spt --quality-model <MULTIMODAL_MODEL_ID>\n  spt --provider <ENDPOINT_TAG|any>        # any 为显式隐私降级",
@@ -500,6 +509,15 @@ fn print_config(config: &Config, path: &std::path::Path) {
     println!("schema_version={}", config.schema_version);
     println!("model={}", config.model);
     println!("quality_review_model={}", config.quality_review_model);
+    for (label, model) in [
+        ("model_options", &config.model),
+        ("quality_model_options", &config.quality_review_model),
+    ] {
+        println!(
+            "{label}={}",
+            serde_json::json!(config.effective_chat_model_options(model))
+        );
+    }
     println!("asr_model={}", config.asr_model);
     println!("quality_asr_model={}", config.quality_asr_model);
     println!(
@@ -564,7 +582,7 @@ mod tests {
         assert!(help.contains("spt --asr-model <MODEL_ID>"));
         assert!(help.contains("spt --quality-asr-model <MODEL_ID>"));
         assert!(help.contains("spt --quality-model <MODEL_ID>"));
-        assert!(help.contains("google/gemini-3.7-flash"));
+        assert!(help.contains("spt --model <MODEL_ID> --provider <ENDPOINT_TAG>"));
         assert!(help.contains("spt --raw <AUDIO_PATH>"));
         assert!(help.contains("spt --verify-all <AUDIO_PATH>"));
         assert!(help.contains("spt help [COMMAND]"));
@@ -649,14 +667,14 @@ mod tests {
 
     #[test]
     fn providers_positional_model_does_not_mutate_the_global_model_option() {
-        let cli = Cli::try_parse_from(["spt", "providers", "google/gemini-3.7-flash"]).unwrap();
+        let cli = Cli::try_parse_from(["spt", "providers", "example/overlay-v2"]).unwrap();
         assert!(cli.model.is_none());
         assert!(cli.quality_model.is_none());
         assert!(matches!(
             cli.command,
             Some(Commands::Providers {
                 target_model: Some(ref model)
-            }) if model == "google/gemini-3.7-flash"
+            }) if model == "example/overlay-v2"
         ));
     }
 
@@ -666,24 +684,24 @@ mod tests {
         apply_config_overrides(
             &mut config,
             ConfigOverrides {
-                model: Some("google/gemini-3.5-flash-lite"),
+                model: Some("example/overlay-v1"),
                 ..ConfigOverrides::default()
             },
         )
         .unwrap();
-        assert_eq!(config.model, "google/gemini-3.5-flash-lite");
-        assert_eq!(config.quality_review_model, "google/gemini-3.5-flash-lite");
+        assert_eq!(config.model, "example/overlay-v1");
+        assert_eq!(config.quality_review_model, "example/overlay-v1");
 
         apply_config_overrides(
             &mut config,
             ConfigOverrides {
-                quality_model: Some("google/gemini-3.7-flash"),
+                quality_model: Some("example/overlay-v2"),
                 ..ConfigOverrides::default()
             },
         )
         .unwrap();
-        assert_eq!(config.model, "google/gemini-3.5-flash-lite");
-        assert_eq!(config.quality_review_model, "google/gemini-3.7-flash");
+        assert_eq!(config.model, "example/overlay-v1");
+        assert_eq!(config.quality_review_model, "example/overlay-v2");
     }
 
     #[test]

@@ -1,7 +1,9 @@
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use anyhow::{Context, Result, anyhow, bail};
 use fs2::FileExt;
@@ -10,16 +12,72 @@ use tempfile::NamedTempFile;
 
 use crate::security::{secure_directory, secure_file};
 
-pub const DEFAULT_MODEL: &str = "google/gemini-3.7-flash";
-pub const DEFAULT_QUALITY_REVIEW_MODEL: &str = "google/gemini-3.7-flash";
-pub const DEFAULT_ASR_MODEL: &str = "qwen/qwen3-asr-1.7b";
-pub const DEFAULT_QUALITY_ASR_MODEL: &str = "fish-audio/transcribe-1";
-pub const DEFAULT_PROVIDER: &str = "google-vertex/global";
-pub const DEFAULT_ASR_PROVIDER: &str = "deepinfra";
-pub const DEFAULT_QUALITY_ASR_PROVIDER: &str = "fish-audio";
 pub const ANY_PROVIDER: &str = "any";
 
-const LEGACY_DEFAULT_MODEL: &str = "google/gemini-3.5-flash-lite";
+/// Release defaults are data, separate from the model-independent runtime.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelDefaults {
+    pub routes: DefaultRoutes,
+    legacy: LegacyRoutes,
+    chat_model_options: BTreeMap<String, ChatModelOptions>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DefaultRoutes {
+    pub model: String,
+    pub quality_review_model: String,
+    pub asr_model: String,
+    pub quality_asr_model: String,
+    pub provider: String,
+    pub asr_provider: String,
+    pub quality_asr_provider: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyRoutes {
+    model: String,
+    quality_review_model: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ChatModelOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+}
+
+impl ChatModelOptions {
+    fn validate(&self) -> Result<()> {
+        if let Some(effort) = &self.reasoning_effort
+            && !matches!(
+                effort.as_str(),
+                "none" | "minimal" | "low" | "medium" | "high" | "xhigh"
+            )
+        {
+            bail!("chat_model_options reasoning_effort 必须为 none/minimal/low/medium/high/xhigh");
+        }
+        Ok(())
+    }
+}
+
+pub fn model_defaults() -> &'static ModelDefaults {
+    static DEFAULTS: LazyLock<ModelDefaults> = LazyLock::new(|| {
+        let defaults: ModelDefaults = toml::from_str(include_str!("../defaults/models.toml"))
+            .expect("invalid bundled defaults/models.toml");
+        for (model, options) in &defaults.chat_model_options {
+            validate_model_id(model).expect("invalid bundled model option key");
+            options.validate().expect("invalid bundled model options");
+        }
+        defaults
+    });
+    &DEFAULTS
+}
+
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 
 pub struct ConfigLock {
@@ -313,31 +371,43 @@ const fn default_schema_version() -> u32 {
 }
 
 fn default_model() -> String {
-    DEFAULT_MODEL.to_owned()
+    model_defaults().routes.model.as_str().to_owned()
 }
 
 fn default_quality_review_model() -> String {
-    DEFAULT_QUALITY_REVIEW_MODEL.to_owned()
+    model_defaults()
+        .routes
+        .quality_review_model
+        .as_str()
+        .to_owned()
 }
 
 fn default_asr_model() -> String {
-    DEFAULT_ASR_MODEL.to_owned()
+    model_defaults().routes.asr_model.as_str().to_owned()
 }
 
 fn default_quality_asr_model() -> String {
-    DEFAULT_QUALITY_ASR_MODEL.to_owned()
+    model_defaults()
+        .routes
+        .quality_asr_model
+        .as_str()
+        .to_owned()
 }
 
 fn default_provider() -> String {
-    DEFAULT_PROVIDER.to_owned()
+    model_defaults().routes.provider.as_str().to_owned()
 }
 
 fn default_asr_provider() -> String {
-    DEFAULT_ASR_PROVIDER.to_owned()
+    model_defaults().routes.asr_provider.as_str().to_owned()
 }
 
 fn default_quality_asr_provider() -> String {
-    DEFAULT_QUALITY_ASR_PROVIDER.to_owned()
+    model_defaults()
+        .routes
+        .quality_asr_provider
+        .as_str()
+        .to_owned()
 }
 
 const fn default_chunk_seconds() -> u64 {
@@ -417,6 +487,8 @@ pub struct Config {
     pub provider: String,
     pub asr_provider: String,
     pub quality_asr_provider: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub chat_model_options: BTreeMap<String, ChatModelOptions>,
     pub chunk_seconds: u64,
     pub overlap_seconds: u64,
     pub min_chunk_seconds: u64,
@@ -456,7 +528,7 @@ impl Default for LegacyConfigV1 {
     fn default() -> Self {
         Self {
             schema_version: 1,
-            model: LEGACY_DEFAULT_MODEL.to_owned(),
+            model: model_defaults().legacy.model.as_str().to_owned(),
             provider: default_provider(),
             chunk_seconds: 300,
             min_chunk_seconds: default_min_chunk_seconds(),
@@ -504,6 +576,7 @@ impl Default for Config {
             provider: default_provider(),
             asr_provider: default_asr_provider(),
             quality_asr_provider: default_quality_asr_provider(),
+            chat_model_options: BTreeMap::new(),
             chunk_seconds: default_chunk_seconds(),
             overlap_seconds: default_overlap_seconds(),
             min_chunk_seconds: default_min_chunk_seconds(),
@@ -579,6 +652,13 @@ impl Config {
         validate_provider_id(&self.provider)?;
         validate_provider_id(&self.asr_provider)?;
         validate_provider_id(&self.quality_asr_provider)?;
+        if self.chat_model_options.len() > 128 {
+            bail!("chat_model_options 最多允许 128 个模型条目");
+        }
+        for (model, options) in &self.chat_model_options {
+            validate_model_id(model)?;
+            options.validate()?;
+        }
         if !(30..=900).contains(&self.chunk_seconds) {
             bail!("SpeakerHarness 的 chunk_seconds 必须在 30 到 900 之间");
         }
@@ -636,6 +716,12 @@ impl Config {
         Ok(())
     }
 
+    pub fn effective_chat_model_options(&self, model: &str) -> Option<&ChatModelOptions> {
+        self.chat_model_options
+            .get(model)
+            .or_else(|| model_defaults().chat_model_options.get(model))
+    }
+
     pub fn uses_any_provider(&self) -> bool {
         self.provider.eq_ignore_ascii_case(ANY_PROVIDER)
     }
@@ -669,7 +755,7 @@ impl Config {
 
     fn migrate_v1(&mut self) {
         self.schema_version = default_schema_version();
-        if self.model == LEGACY_DEFAULT_MODEL {
+        if self.model == model_defaults().legacy.model.as_str() {
             self.model = default_model();
         }
         self.quality_review_model = self.model.clone();
@@ -755,7 +841,7 @@ fn decode_config(raw: &str) -> Result<(Config, bool)> {
         2 => {
             let mut config = parse_toml_safely::<Config>(raw, "无法解析 v2 配置（内容已隐藏）")?;
             config.schema_version = default_schema_version();
-            if config.model == LEGACY_DEFAULT_MODEL {
+            if config.model == model_defaults().legacy.model.as_str() {
                 config.model = default_model();
             }
             config.quality_review_model = config.model.clone();
@@ -768,10 +854,13 @@ fn decode_config(raw: &str) -> Result<(Config, bool)> {
         3 => {
             let mut config = parse_toml_safely::<Config>(raw, "无法解析 v3 配置（内容已隐藏）")?;
             config.schema_version = default_schema_version();
-            if config.model == LEGACY_DEFAULT_MODEL
-                && config.quality_review_model == DEFAULT_QUALITY_REVIEW_MODEL
+            if config.model == model_defaults().legacy.model.as_str()
+                && (config.quality_review_model
+                    == model_defaults().legacy.quality_review_model.as_str()
+                    || document.get("quality_review_model").is_none())
             {
                 config.model = default_model();
+                config.quality_review_model = default_quality_review_model();
             }
             config.asr_model = default_asr_model();
             config.quality_asr_model = default_quality_asr_model();
@@ -975,23 +1064,35 @@ mod tests {
         let config = Config::default();
         config.validate().unwrap();
         assert_eq!(config.schema_version, 4);
-        assert_eq!(config.model, DEFAULT_MODEL);
-        assert_eq!(config.quality_review_model, DEFAULT_QUALITY_REVIEW_MODEL);
+        assert_eq!(config.model, model_defaults().routes.model.as_str());
+        assert_eq!(
+            config.quality_review_model,
+            model_defaults().routes.quality_review_model.as_str()
+        );
         assert_eq!(config.model, config.quality_review_model);
-        assert_eq!(config.asr_model, DEFAULT_ASR_MODEL);
-        assert_eq!(config.quality_asr_model, DEFAULT_QUALITY_ASR_MODEL);
-        assert_eq!(config.asr_provider, DEFAULT_ASR_PROVIDER);
-        assert_eq!(config.quality_asr_provider, DEFAULT_QUALITY_ASR_PROVIDER);
+        assert_eq!(config.asr_model, model_defaults().routes.asr_model.as_str());
+        assert_eq!(
+            config.quality_asr_model,
+            model_defaults().routes.quality_asr_model.as_str()
+        );
+        assert_eq!(
+            config.asr_provider,
+            model_defaults().routes.asr_provider.as_str()
+        );
+        assert_eq!(
+            config.quality_asr_provider,
+            model_defaults().routes.quality_asr_provider.as_str()
+        );
         assert_eq!(config.chunk_seconds, 900);
         assert_eq!(config.overlap_seconds, 30);
         assert_eq!(config.parallel_requests, 1);
         assert_eq!(
             config.effective_quality_review_model(),
-            DEFAULT_QUALITY_REVIEW_MODEL
+            model_defaults().routes.quality_review_model.as_str()
         );
         assert_eq!(
             config.effective_quality_asr_model(),
-            DEFAULT_QUALITY_ASR_MODEL
+            model_defaults().routes.quality_asr_model.as_str()
         );
         assert_eq!(config.effective_asr_chunk_seconds(), 120);
         assert_eq!(config.effective_asr_min_chunk_seconds(), 30);
@@ -1035,9 +1136,9 @@ mod tests {
 
     #[test]
     fn model_requires_openrouter_slug() {
-        assert!(validate_model_id(DEFAULT_MODEL).is_ok());
-        assert!(validate_model_id(DEFAULT_ASR_MODEL).is_ok());
-        assert!(validate_model_id(DEFAULT_QUALITY_ASR_MODEL).is_ok());
+        assert!(validate_model_id(model_defaults().routes.model.as_str()).is_ok());
+        assert!(validate_model_id(model_defaults().routes.asr_model.as_str()).is_ok());
+        assert!(validate_model_id(model_defaults().routes.quality_asr_model.as_str()).is_ok());
         assert!(validate_model_id("gemini").is_err());
         assert!(validate_model_id("google/gemini 3").is_err());
         assert!(validate_model_id("google/gemini?key=x").is_err());
@@ -1046,9 +1147,11 @@ mod tests {
 
     #[test]
     fn provider_accepts_pinned_or_any() {
-        assert!(validate_provider_id(DEFAULT_PROVIDER).is_ok());
-        assert!(validate_provider_id(DEFAULT_ASR_PROVIDER).is_ok());
-        assert!(validate_provider_id(DEFAULT_QUALITY_ASR_PROVIDER).is_ok());
+        assert!(validate_provider_id(model_defaults().routes.provider.as_str()).is_ok());
+        assert!(validate_provider_id(model_defaults().routes.asr_provider.as_str()).is_ok());
+        assert!(
+            validate_provider_id(model_defaults().routes.quality_asr_provider.as_str()).is_ok()
+        );
         assert!(validate_provider_id(ANY_PROVIDER).is_ok());
         assert!(validate_provider_id("bad provider").is_err());
 
@@ -1066,13 +1169,28 @@ mod tests {
         let encoded = toml::to_string(&config).unwrap();
         let decoded: Config = toml::from_str(&encoded).unwrap();
         assert_eq!(decoded.schema_version, 4);
-        assert_eq!(decoded.model, DEFAULT_MODEL);
-        assert_eq!(decoded.quality_review_model, DEFAULT_QUALITY_REVIEW_MODEL);
-        assert_eq!(decoded.asr_model, DEFAULT_ASR_MODEL);
-        assert_eq!(decoded.quality_asr_model, DEFAULT_QUALITY_ASR_MODEL);
-        assert_eq!(decoded.provider, DEFAULT_PROVIDER);
-        assert_eq!(decoded.asr_provider, DEFAULT_ASR_PROVIDER);
-        assert_eq!(decoded.quality_asr_provider, DEFAULT_QUALITY_ASR_PROVIDER);
+        assert_eq!(decoded.model, model_defaults().routes.model.as_str());
+        assert_eq!(
+            decoded.quality_review_model,
+            model_defaults().routes.quality_review_model.as_str()
+        );
+        assert_eq!(
+            decoded.asr_model,
+            model_defaults().routes.asr_model.as_str()
+        );
+        assert_eq!(
+            decoded.quality_asr_model,
+            model_defaults().routes.quality_asr_model.as_str()
+        );
+        assert_eq!(decoded.provider, model_defaults().routes.provider.as_str());
+        assert_eq!(
+            decoded.asr_provider,
+            model_defaults().routes.asr_provider.as_str()
+        );
+        assert_eq!(
+            decoded.quality_asr_provider,
+            model_defaults().routes.quality_asr_provider.as_str()
+        );
     }
 
     #[test]
@@ -1091,8 +1209,11 @@ mod tests {
         assert_eq!(config.max_output_tokens, 16_000);
         assert_eq!(config.split_output_tokens, 12_000);
         assert_eq!(config.parallel_requests, 1);
-        assert_eq!(config.model, DEFAULT_MODEL);
-        assert_eq!(config.quality_review_model, DEFAULT_QUALITY_REVIEW_MODEL);
+        assert_eq!(config.model, model_defaults().routes.model.as_str());
+        assert_eq!(
+            config.quality_review_model,
+            model_defaults().routes.quality_review_model.as_str()
+        );
         config.validate().unwrap();
     }
 
@@ -1121,23 +1242,36 @@ mod tests {
         assert_eq!(config.model, "anthropic/claude-sonnet-4.5");
         assert_eq!(config.quality_review_model, "anthropic/claude-sonnet-4.5");
         assert_eq!(config.provider, ANY_PROVIDER);
-        assert_eq!(config.asr_model, DEFAULT_ASR_MODEL);
-        assert_eq!(config.quality_asr_model, DEFAULT_QUALITY_ASR_MODEL);
-        assert_eq!(config.asr_provider, DEFAULT_ASR_PROVIDER);
-        assert_eq!(config.quality_asr_provider, DEFAULT_QUALITY_ASR_PROVIDER);
+        assert_eq!(config.asr_model, model_defaults().routes.asr_model.as_str());
+        assert_eq!(
+            config.quality_asr_model,
+            model_defaults().routes.quality_asr_model.as_str()
+        );
+        assert_eq!(
+            config.asr_provider,
+            model_defaults().routes.asr_provider.as_str()
+        );
+        assert_eq!(
+            config.quality_asr_provider,
+            model_defaults().routes.quality_asr_provider.as_str()
+        );
         config.validate().unwrap();
     }
 
     #[test]
-    fn v1_legacy_default_lite_migrates_to_37_overlay() {
+    fn v1_legacy_default_lite_migrates_to_current_overlay() {
         let (config, migrated) = decode_config(&format!(
-            "schema_version = 1\nmodel = \"{LEGACY_DEFAULT_MODEL}\"\n"
+            "schema_version = 1\nmodel = \"{legacy_model}\"\n",
+            legacy_model = model_defaults().legacy.model
         ))
         .unwrap();
         assert!(migrated);
         assert_eq!(config.schema_version, 4);
-        assert_eq!(config.model, DEFAULT_MODEL);
-        assert_eq!(config.quality_review_model, DEFAULT_QUALITY_REVIEW_MODEL);
+        assert_eq!(config.model, model_defaults().routes.model.as_str());
+        assert_eq!(
+            config.quality_review_model,
+            model_defaults().routes.quality_review_model.as_str()
+        );
         assert_eq!(config.model, config.quality_review_model);
     }
 
@@ -1180,11 +1314,23 @@ mod tests {
         assert!(migrated);
         assert_eq!(config.overlap_seconds, 30);
         assert_eq!(config.schema_version, 4);
-        assert_eq!(config.quality_review_model, DEFAULT_MODEL);
-        assert_eq!(config.asr_model, DEFAULT_ASR_MODEL);
-        assert_eq!(config.quality_asr_model, DEFAULT_QUALITY_ASR_MODEL);
-        assert_eq!(config.asr_provider, DEFAULT_ASR_PROVIDER);
-        assert_eq!(config.quality_asr_provider, DEFAULT_QUALITY_ASR_PROVIDER);
+        assert_eq!(
+            config.quality_review_model,
+            model_defaults().routes.model.as_str()
+        );
+        assert_eq!(config.asr_model, model_defaults().routes.asr_model.as_str());
+        assert_eq!(
+            config.quality_asr_model,
+            model_defaults().routes.quality_asr_model.as_str()
+        );
+        assert_eq!(
+            config.asr_provider,
+            model_defaults().routes.asr_provider.as_str()
+        );
+        assert_eq!(
+            config.quality_asr_provider,
+            model_defaults().routes.quality_asr_provider.as_str()
+        );
         config.validate().unwrap();
     }
 
@@ -1197,15 +1343,19 @@ mod tests {
     }
 
     #[test]
-    fn v2_legacy_default_lite_migrates_to_37_overlay() {
+    fn v2_legacy_default_lite_migrates_to_current_overlay() {
         let (config, migrated) = decode_config(&format!(
-            "schema_version = 2\nmodel = \"{LEGACY_DEFAULT_MODEL}\"\n"
+            "schema_version = 2\nmodel = \"{legacy_model}\"\n",
+            legacy_model = model_defaults().legacy.model
         ))
         .unwrap();
         assert!(migrated);
         assert_eq!(config.schema_version, 4);
-        assert_eq!(config.model, DEFAULT_MODEL);
-        assert_eq!(config.quality_review_model, DEFAULT_QUALITY_REVIEW_MODEL);
+        assert_eq!(config.model, model_defaults().routes.model.as_str());
+        assert_eq!(
+            config.quality_review_model,
+            model_defaults().routes.quality_review_model.as_str()
+        );
         assert_eq!(config.model, config.quality_review_model);
     }
 
@@ -1220,10 +1370,19 @@ mod tests {
         assert_eq!(config.model, "anthropic/claude-sonnet-4.5");
         assert_eq!(config.quality_review_model, "anthropic/claude-sonnet-4.5");
         assert_eq!(config.provider, ANY_PROVIDER);
-        assert_eq!(config.asr_model, DEFAULT_ASR_MODEL);
-        assert_eq!(config.quality_asr_model, DEFAULT_QUALITY_ASR_MODEL);
-        assert_eq!(config.asr_provider, DEFAULT_ASR_PROVIDER);
-        assert_eq!(config.quality_asr_provider, DEFAULT_QUALITY_ASR_PROVIDER);
+        assert_eq!(config.asr_model, model_defaults().routes.asr_model.as_str());
+        assert_eq!(
+            config.quality_asr_model,
+            model_defaults().routes.quality_asr_model.as_str()
+        );
+        assert_eq!(
+            config.asr_provider,
+            model_defaults().routes.asr_provider.as_str()
+        );
+        assert_eq!(
+            config.quality_asr_provider,
+            model_defaults().routes.quality_asr_provider.as_str()
+        );
     }
 
     #[test]
@@ -1238,37 +1397,52 @@ mod tests {
         assert_eq!(config.quality_review_model, "google/gemini-3.7-flash");
         assert_eq!(config.provider, ANY_PROVIDER);
         assert_eq!(config.chunk_seconds, 480);
-        assert_eq!(config.asr_model, DEFAULT_ASR_MODEL);
-        assert_eq!(config.quality_asr_model, DEFAULT_QUALITY_ASR_MODEL);
-        assert_eq!(config.asr_provider, DEFAULT_ASR_PROVIDER);
-        assert_eq!(config.quality_asr_provider, DEFAULT_QUALITY_ASR_PROVIDER);
+        assert_eq!(config.asr_model, model_defaults().routes.asr_model.as_str());
+        assert_eq!(
+            config.quality_asr_model,
+            model_defaults().routes.quality_asr_model.as_str()
+        );
+        assert_eq!(
+            config.asr_provider,
+            model_defaults().routes.asr_provider.as_str()
+        );
+        assert_eq!(
+            config.quality_asr_provider,
+            model_defaults().routes.quality_asr_provider.as_str()
+        );
         config.validate().unwrap();
     }
 
     #[test]
-    fn v3_official_lite_37_pair_migrates_both_overlays_to_37() {
+    fn v3_official_lite_37_pair_migrates_both_overlays_to_current() {
         let (config, migrated) = decode_config(&format!(
-            "schema_version = 3\nmodel = \"{LEGACY_DEFAULT_MODEL}\"\nquality_review_model = \"{DEFAULT_QUALITY_REVIEW_MODEL}\"\nprovider = \"google-vertex/global\"\n"
+            "schema_version = 3\nmodel = \"{legacy_model}\"\nquality_review_model = \"{legacy_quality_model}\"\nprovider = \"google-vertex/global\"\n", legacy_model = model_defaults().legacy.model, legacy_quality_model = model_defaults().legacy.quality_review_model
         ))
         .unwrap();
         assert!(migrated);
         assert_eq!(config.schema_version, 4);
-        assert_eq!(config.model, DEFAULT_MODEL);
-        assert_eq!(config.quality_review_model, DEFAULT_QUALITY_REVIEW_MODEL);
+        assert_eq!(config.model, model_defaults().routes.model.as_str());
+        assert_eq!(
+            config.quality_review_model,
+            model_defaults().routes.quality_review_model.as_str()
+        );
         assert_eq!(config.model, config.quality_review_model);
-        assert_eq!(config.provider, DEFAULT_PROVIDER);
+        assert_eq!(config.provider, model_defaults().routes.provider.as_str());
     }
 
     #[test]
     fn v3_explicit_single_lite_overlay_is_preserved_as_custom() {
         let (config, migrated) = decode_config(&format!(
-            "schema_version = 3\nmodel = \"{LEGACY_DEFAULT_MODEL}\"\nquality_review_model = \"{LEGACY_DEFAULT_MODEL}\"\nprovider = \"any\"\n"
+            "schema_version = 3\nmodel = \"{legacy_model}\"\nquality_review_model = \"{legacy_model}\"\nprovider = \"any\"\n", legacy_model = model_defaults().legacy.model
         ))
         .unwrap();
         assert!(migrated);
         assert_eq!(config.schema_version, 4);
-        assert_eq!(config.model, LEGACY_DEFAULT_MODEL);
-        assert_eq!(config.quality_review_model, LEGACY_DEFAULT_MODEL);
+        assert_eq!(config.model, model_defaults().legacy.model.as_str());
+        assert_eq!(
+            config.quality_review_model,
+            model_defaults().legacy.model.as_str()
+        );
         assert_eq!(config.provider, ANY_PROVIDER);
     }
 
@@ -1285,6 +1459,41 @@ mod tests {
         assert_eq!(config.asr_provider, "custom-raw");
         assert_eq!(config.quality_asr_provider, "custom-quality");
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn custom_chat_options_round_trip_and_reject_uncontrolled_fields() {
+        let raw = r#"
+            schema_version = 4
+            model = "example/new-overlay"
+            quality_review_model = "example/quality-overlay"
+            [chat_model_options."example/new-overlay"]
+            seed = 42
+            reasoning_effort = "low"
+        "#;
+        let (config, migrated) = decode_config(raw).unwrap();
+        assert!(!migrated);
+        let saved = toml::to_string(&config).unwrap();
+        let (restored, migrated) = decode_config(&saved).unwrap();
+        assert!(!migrated);
+        assert_eq!(config, restored);
+        assert_eq!(restored.model, "example/new-overlay");
+        assert_eq!(
+            restored
+                .effective_chat_model_options(&restored.model)
+                .unwrap()
+                .seed,
+            Some(42)
+        );
+        assert!(decode_config(&raw.replace("seed = 42", "model = \"other/override\"")).is_err());
+        assert!(decode_config(&raw.replace("low", "unbounded")).is_err());
+        assert!(decode_config(&raw.replace("example/new-overlay", "invalid model")).is_err());
+        let old = Config::default();
+        assert!(
+            !toml::to_string(&old)
+                .unwrap()
+                .contains("chat_model_options")
+        );
     }
 
     #[test]
@@ -1478,11 +1687,23 @@ mod tests {
         assert_eq!(config.max_output_tokens, 16_000);
         assert_eq!(config.split_output_tokens, 12_000);
         assert_eq!(config.parallel_requests, 1);
-        assert_eq!(config.model, DEFAULT_MODEL);
-        assert_eq!(config.quality_review_model, DEFAULT_MODEL);
-        assert_eq!(config.asr_model, DEFAULT_ASR_MODEL);
-        assert_eq!(config.quality_asr_model, DEFAULT_QUALITY_ASR_MODEL);
-        assert_eq!(config.asr_provider, DEFAULT_ASR_PROVIDER);
-        assert_eq!(config.quality_asr_provider, DEFAULT_QUALITY_ASR_PROVIDER);
+        assert_eq!(config.model, model_defaults().routes.model.as_str());
+        assert_eq!(
+            config.quality_review_model,
+            model_defaults().routes.model.as_str()
+        );
+        assert_eq!(config.asr_model, model_defaults().routes.asr_model.as_str());
+        assert_eq!(
+            config.quality_asr_model,
+            model_defaults().routes.quality_asr_model.as_str()
+        );
+        assert_eq!(
+            config.asr_provider,
+            model_defaults().routes.asr_provider.as_str()
+        );
+        assert_eq!(
+            config.quality_asr_provider,
+            model_defaults().routes.quality_asr_provider.as_str()
+        );
     }
 }
