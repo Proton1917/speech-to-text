@@ -2,11 +2,11 @@
 
 spt 是一个以 OpenRouter 专用语音转写接口为正文来源的 Rust CLI。给出本地音频路径后，它会在音频旁生成 Markdown；图片 OCR 仍作为独立子命令提供。
 
-当前发布版本为 0.6.0。本仓库只包含后端和 CLI，前端尚未开始。默认链路已经从“让通用多模态模型同时猜正文和说话人”改为“专用 STT 返回 provider source，Rust 冻结事实片段受保护的 OpenCC 展示投影，再做受约束的 turn 与说话人 overlay”。
+当前发布版本为 0.6.1。本仓库只包含后端和 CLI，前端尚未开始。默认链路已经从“让通用多模态模型同时猜正文和说话人”改为“专用 STT 返回 provider source，Rust 冻结事实片段受保护的 OpenCC 展示投影，再做受约束的 turn 与说话人 overlay”。
 
 ## 快速开始
 
-通过 Homebrew tap 安装 0.6.0：
+通过 Homebrew tap 安装 0.6.1：
 
 ~~~bash
 brew install Proton1917/tap/spt
@@ -58,7 +58,7 @@ transcript_accuracy_verification: "not_measured"
   → Primary STT：Qwen3 ASR 1.7B，生成正文 authority
   → quality 默认：首段及每第 5 个根 TARGET 用 MAI-Transcribe-2 独立抽检
   → quality --verify-all：每个根 TARGET 都运行 MAI-Transcribe-2
-  → Primary 非空时，Gemini 3.8 Flash：只返回 turn、时间和局部声音标签
+  → Primary 非空时，Gemini 3.1 Pro Preview（High）：只返回 turn、时间和局部声音标签
   → Rust：把每个 turn.text 恢复为经校验、事实片段保护和 OpenCC 展示归一化后的 Primary 冻结切片
   → quality only：Rust 只做事实字符不变的标点/邻接空格清理，并标记可能的口吃；raw 完全跳过
   → SpeakerHarness：按逐 turn 短声音包映射为 S1、S2、NEW 或 UNKNOWN
@@ -81,14 +81,14 @@ transcript_accuracy_verification: "not_measured"
 | --- | --- | --- | --- |
 | Primary STT | qwen/qwen3-asr-1.7b | deepinfra | quality/raw 正文 |
 | Quality STT | microsoft/mai-transcribe-2 | azure | 仅 quality canonical 交叉检查 |
-| Turn 与说话人 overlay | google/gemini-3.8-flash | google-vertex/global | turn 边界和逐 turn 声音比较 |
-| OCR | google/gemini-3.8-flash | google-vertex/global | 单图 OCR |
+| Turn 与说话人 overlay | google/gemini-3.1-pro-preview | google-vertex/global | turn 边界和逐 turn 声音比较 |
+| OCR | google/gemini-3.1-pro-preview | google-vertex/global | 单图 OCR |
 
-Gemini 3.8 Flash 的音频/图片输入、结构化输出及 `google-vertex/global` ZDR 端点已于 2026-09-08 对照 OpenRouter 实时目录核对；下文 2026-08-24 的音频评测仍属于 Gemini 3.7，不代表 3.8 的实测结果。
+Gemini 3.1 Pro Preview 的音频/图片输入、结构化输出及 `google-vertex/global` ZDR 端点已于 2026-09-16 对照 OpenRouter 实时目录核对；默认 profile 使用 `seed=0` 和 `reasoning_effort=high`。下文 2026-08-24 的音频评测仍属于 Gemini 3.7，不代表 3.1 Pro 的实测结果。
 
 中文正文继续由 Qwen3 ASR 1.7B 负责；它在[官方模型卡](https://huggingface.co/Qwen/Qwen3-ASR-1.7B)的 WenetSpeech meeting、AISHELL-2、SpeechIO、FLEURS-zh 与 Common Voice zh 上均优于同表的 GPT-4o Transcribe 和 Gemini 2.5 Pro。第二路核验改用 MAI-Transcribe-2：该模型在 [Artificial Analysis 当前非流式榜单](https://artificialanalysis.ai/speech-to-text/non-streaming)的 AA-WER 为 2.04%，[微软官方](https://microsoft.ai/models/mai-transcribe-2/)报告其在 FLEURS 60 语言平均 WER 为 5.2%，并提供关键词偏置、说话人分离和词级时间戳。OpenRouter 实时目录中它只有 active `azure` endpoint，且同一 model/tag 位于 ZDR 目录。两者尚无同一批中文会议录音的直接公开 A/B，因此 MAI 只提供独立核验证据，不能覆盖 Qwen Primary。
 
-Gemini 3.1 Pro Preview 的音频能力也很强：Artificial Analysis 当前 High reasoning AA-WER 约 2.82%，Low 约 3.58%。但它仍是 preview，High 档明显更慢、更贵；OpenRouter `google-vertex/global` 的音频输入单价约为 Gemini 3.8 Flash 的 2.7 倍，输出约为 3.2 倍。因此默认每段 overlay 保留 Gemini 3.8 Flash。需要把更昂贵的 Pro 只用于 quality overlay 时可显式执行 `spt --quality-model google/gemini-3.1-pro-preview`，并在用户 `chat_model_options` 中自行选择 reasoning_effort；raw 与 OCR 仍使用基础 overlay 模型。
+Gemini 3.1 Pro Preview 的音频能力较强：Artificial Analysis 当前 High reasoning AA-WER 约 2.82%，Low 约 3.58%。它仍是 preview，High 档明显更慢、更贵；OpenRouter `google-vertex/global` 的音频输入单价约为 Gemini 3.8 Flash 的 2.7 倍，输出约为 3.2 倍。由于默认使用场景以质量优先且调用量不大，raw、quality overlay 与 OCR 均使用 3.1 Pro High。需要恢复低成本模式时可执行 `spt --model google/gemini-3.8-flash`；该模型的内置 profile 使用 minimal reasoning。
 
 专用 STT 使用 OpenRouter 的 POST /api/v1/audio/transcriptions：
 
@@ -133,7 +133,7 @@ quality 的执行顺序是：
 
 1. 每个 TARGET 都运行 Primary STT；
 2. 默认只在第 1、6、11……个根 TARGET 运行 Quality STT，也就是首段后约每 10 分钟抽检一次；`--verify-all` 改为每段核验；
-3. 仅当 Primary 正文非空时运行 Gemini 3.8 turn overlay，最多两次结构尝试；
+3. 仅当 Primary 正文非空时运行 Gemini 3.1 Pro High turn overlay，最多两次结构尝试；
 4. 仅当 overlay 产生可采样候选时运行一次可选 SpeakerHarness Stage B；
 5. Rust 逐 turn 执行 presentation-only 清稿：只规范中文语境标点和标点旁单空格；`嗯/呃`、重复、专名、数字、否定、条件及其他所有 spoken words 原样保留，疑似口吃只写 signal，不自动删字；任何越权变化整 turn 回退 Primary。
 
@@ -171,7 +171,7 @@ spt --verify-all "meeting.m4a"
 spt --raw "meeting.m4a"
 ~~~
 
-raw 不调用 MAI-Transcribe-2，也不运行双 ASR 核对或 quality 清稿。Primary 正文非空时，它与 quality 一样使用 Gemini 3.8 做 turn/说话人 overlay；Primary 为空时跳过 overlay 和 Stage B。raw 的成本通常低于 quality，两种模式采用相同的 speaker 策略。
+raw 不调用 MAI-Transcribe-2，也不运行双 ASR 核对或 quality 清稿。Primary 正文非空时，它与 quality 一样使用 Gemini 3.1 Pro High 做 turn/说话人 overlay；Primary 为空时跳过 overlay 和 Stage B。raw 的成本通常低于 quality，两种模式采用相同的 speaker 策略。
 
 ## 说话人处理
 
@@ -278,8 +278,8 @@ quality_asr_model = "microsoft/mai-transcribe-2"
 asr_provider = "deepinfra"
 quality_asr_provider = "azure"
 
-model = "google/gemini-3.8-flash"
-quality_review_model = "google/gemini-3.8-flash"
+model = "google/gemini-3.1-pro-preview"
+quality_review_model = "google/gemini-3.1-pro-preview"
 provider = "google-vertex/global"
 
 chunk_seconds = 900
@@ -300,24 +300,24 @@ chunk_seconds 为兼容配置上限；专用 STT 的实际根 TARGET 仍硬限�
 
 旧配置会在取得同目录 .config.lock 后原子迁移到 v4，具体规则如下：
 
-- v1：保留自定义 model/provider，并把同一个自定义 model 复制到 raw 与 quality 两条 overlay；旧官方默认 Lite 升级为两条 3.8 overlay。补入默认 Primary/Quality STT 路由。旧默认 chunk_seconds=300 升为 900，其他值最高收紧到 900；overlap_seconds 根据迁移后的 chunk 取 5–30 秒有效值；min_chunk_seconds 收紧到有效范围且不超过 chunk 的一半；旧默认 6000/5000 token 对升级为 16000/12000，其他合法自定义 token 对保留；parallel_requests 固定为 1。
-- v2：保留自定义 model/provider，并把该 model 复制到两条 overlay；旧官方默认 Lite 升级为两条 3.8 overlay。补入默认 Primary/Quality STT 路由，超过 30 秒的旧 overlap 会收紧到有效上限。
-- v3：保留已有的 model、quality_review_model 和 provider 双模型配置；旧官方 Lite + 3.7（或 Lite 且未填写 quality_review_model）会升级为两条 3.8 overlay。Lite + Lite 和其他自定义双模型组合保持原值，并补入默认 Primary/Quality STT 路由。
+- v1：保留自定义 model/provider，并把同一个自定义 model 复制到 raw 与 quality 两条 overlay；旧官方默认 Lite 升级为两条 3.1 Pro overlay。补入默认 Primary/Quality STT 路由。旧默认 chunk_seconds=300 升为 900，其他值最高收紧到 900；overlap_seconds 根据迁移后的 chunk 取 5–30 秒有效值；min_chunk_seconds 收紧到有效范围且不超过 chunk 的一半；旧默认 6000/5000 token 对升级为 16000/12000，其他合法自定义 token 对保留；parallel_requests 固定为 1。
+- v2：保留自定义 model/provider，并把该 model 复制到两条 overlay；旧官方默认 Lite 升级为两条 3.1 Pro overlay。补入默认 Primary/Quality STT 路由，超过 30 秒的旧 overlap 会收紧到有效上限。
+- v3：保留已有的 model、quality_review_model 和 provider 双模型配置；旧官方 Lite + 3.7（或 Lite 且未填写 quality_review_model）会升级为两条 3.1 Pro overlay。Lite + Lite 和其他自定义双模型组合保持原值，并补入默认 Primary/Quality STT 路由。
 
 Rust 核心不按模型名称或版本选择请求行为。发行版的初始模型、provider、历史迁移标识和默认请求参数集中在 [defaults/models.toml](defaults/models.toml)，该文件打包进程序，首次初始化不依赖联网或当前工作目录。维护发行默认值只修改这份数据文件；已安装程序的日常换模直接修改用户配置，无需重新编译。
 
 已有 v4 配置保留显式模型选择；升级程序不会自动覆盖。将 raw、quality 和 OCR 一起切换到新默认模型：
 
 ~~~bash
-spt --model google/gemini-3.8-flash
+spt --model google/gemini-3.1-pro-preview
 ~~~
 
 模型附加参数也可在用户 `config.toml` **末尾**配置，按完整模型 ID 精确匹配，raw/OCR 和 quality 分别使用各自模型的条目：
 
 ~~~toml
-[chat_model_options."google/gemini-3.8-flash"]
+[chat_model_options."google/gemini-3.1-pro-preview"]
 seed = 0
-reasoning_effort = "minimal"
+reasoning_effort = "high"
 ~~~
 
 用户条目完整替换对应的内置参数；只有表头的空条目会禁用该模型的内置附加参数。未配置且无内置条目的模型不发送 seed 或 reasoning；不会继承其他模型的参数。`spt config` 显示两条 overlay 的生效参数。可配置字段限定为 seed 和 reasoning_effort，不能借此改写请求的 model、provider 或隐私约束。

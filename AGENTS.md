@@ -23,14 +23,14 @@ This repository contains the Rust backend and CLI for spt. The frontend has not 
 
 ## Current defaults
 
-Gemini overlay was updated against the live OpenRouter model/endpoint and ZDR catalogs on 2026-09-08. The MAI quality route was validated against the live OpenRouter model, endpoint and ZDR catalogs on 2026-09-16. The historical controlled synthetic fixture was recorded on 2026-08-24 with Fish Audio and Gemini 3.7; it does not validate the current MAI/Gemini routes:
+The Gemini 3.1 Pro overlay and MAI quality routes were validated against the live OpenRouter model, endpoint and ZDR catalogs on 2026-09-16. The historical controlled synthetic fixture was recorded on 2026-08-24 with Fish Audio and Gemini 3.7; it does not validate the current MAI/Gemini routes:
 
 ~~~text
 Primary STT model       = qwen/qwen3-asr-1.7b
 Primary STT endpoint    = deepinfra
 Quality STT model       = microsoft/mai-transcribe-2
 Quality STT endpoint    = azure
-Raw/quality overlay     = google/gemini-3.8-flash
+Raw/quality overlay     = google/gemini-3.1-pro-preview
 Overlay endpoint        = google-vertex/global
 STT API                 = https://openrouter.ai/api/v1/audio/transcriptions
 Chat API                = https://openrouter.ai/api/v1/chat/completions
@@ -119,3 +119,4 @@ The tracked synthetic baseline is benchmarks/baselines/v0.5.0-synthetic-zh-aba.t
 - 2026-08-24: v0.4.0 added the Gemini Lite/3.7 surface-gated cascade, schema v3 and Homebrew source/bottle delivery.
 - 2026-08-24: v0.5.0 replaced Gemini text authority with dedicated STT, added schema v4, sampled/verify-all cross-ASR evidence, fact-protected OpenCC display text, presentation-only cleanup, per-turn SpeakerHarness mapping, fixed no-follow input snapshots, canonical-duration checks, honest route/cost provenance, OCR rejected-response accounting and bounded ~/.spt lock shards. Release gates pass with 212 library tests, 11 CLI tests, 12 benchmark tests, strict Clippy, release build and Windows cross-build/link. One-run synthetic and pinned ASCEND human-splice A-B-A snapshots both recorded CER 0 and S1-S2-S1 on their narrow fixtures; neither is a meeting/DER claim, and real-meeting acceptance remains open.
 - 2026-09-16: v0.6.0 externalized release routes and chat request profiles into defaults/models.toml, moved raw/quality/OCR overlay defaults to Gemini 3.8 Flash, retained Qwen3 ASR 1.7B as the Chinese Primary, and replaced Fish Audio with ZDR MAI-Transcribe-2/Azure as the independent quality verifier. Historical v0.5 benchmarks remain evidence for the old Fish/Gemini 3.7 routes only.
+- 2026-09-16: v0.6.1 made Gemini 3.1 Pro Preview with High reasoning the default raw/quality/OCR overlay for quality-first, low-volume use. Gemini 3.8 Flash remains a bundled minimal-reasoning profile for explicit lower-cost selection.
